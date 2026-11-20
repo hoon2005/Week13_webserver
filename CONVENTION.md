@@ -52,6 +52,12 @@ make tsan       # 단위 테스트를 ThreadSanitizer로 실행
 make help       # 명령 목록
 ```
 
+평소 작업 흐름은 아래와 같습니다. `make verify`는 위반을 알려 주기만 하고 고치지 않으므로, 그 전에 `make format`을 실행합니다. `make lint`와 `make format`은 git이 아는 파일만 보므로 새 파일은 먼저 `git add`합니다.
+
+```text
+코드 수정 → make → ./build/<이름> 실행 후 curl로 확인 → git add → make format → make verify → 커밋, 푸시, PR
+```
+
 ### 소스 배치
 
 | 위치 | 내용 | 빌드 결과 |
