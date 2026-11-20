@@ -4,7 +4,7 @@ C와 POSIX 소켓 API로 만드는 HTTP 웹 서버와 Proxy 서버입니다. 크
 
 ## 시작하기
 
-macOS 또는 Linux에서 개발합니다. Windows에서는 LMS가 허용한 WSL2+Ubuntu, Docker, 클라우드 중 하나를 쓰며, 무엇을 쓸지는 팀이 정합니다. 필요한 도구와 설치 명령은 [CONVENTION.md의 "개발 환경"](CONVENTION.md#개발-환경)에 있습니다.
+팀은 macOS와 WSL2+Ubuntu에서 개발합니다. 필요한 도구와 설치 명령은 [CONVENTION.md의 "개발 환경"](CONVENTION.md#개발-환경)에 있습니다.
 
 ```bash
 make verify   # 빌드, 단위 테스트, 기능 테스트, 코드 모양 검사 (CI와 같은 명령)
