@@ -1,4 +1,4 @@
-# 우리가 쓰지 않은 코드입니다. 원래 모양을 지키고, `make lint`의 이름 검사에서도
-# 뺍니다(scripts/convention.py가 이 파일을 읽습니다).
+# 우리가 쓰지 않은 코드입니다. 원래 모양을 지키도록 clang-format(`make lint`,
+# `make format`, 에디터)이 이 파일에 적은 경로를 건너뜁니다.
 # acutest.h: https://github.com/mity/acutest, 받은 그대로 둡니다.
 tests/acutest.h

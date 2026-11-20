@@ -1,4 +1,4 @@
-# make verify: CI와 같은 명령입니다. 빌드, 단위 테스트, 기능 테스트, 코드 규칙 검사를
+# make verify: CI와 같은 명령입니다. 빌드, 단위 테스트, 기능 테스트, 코드 모양 검사를
 # 차례로 실행합니다. PR을 올리기 전에 로컬에서 먼저 실행합니다.
 #
 # 소스 배치 규칙
@@ -67,13 +67,19 @@ functional: $(PROGRAMS)
 
 verify: all test functional lint
 
-# 코드 규칙(CONVENTION.md의 "코드")입니다. lint는 위반을 출력하고 실패로 끝나며,
-# format은 모양 위반을 고치고 바꾼 줄을 보여 줍니다.
+# 코드 모양 검사입니다(CONVENTION.md의 "코드"). 모양은 .clang-format이 정하고,
+# .clang-format-ignore에 적은 파일은 clang-format이 스스로 건너뜁니다.
+# git이 아는 파일만 봅니다. 새 파일은 git add 뒤에 검사됩니다.
+# lint는 위반이나 설정 오류가 있으면 실패로 끝나고(--Werror), format은 파일을 고칩니다.
+FORMAT_FILES = $(shell git ls-files -- 'src/*.c' 'src/*.h' 'tests/*.c' 'tests/*.h')
+
 lint:
-	@python3 scripts/convention.py lint
+	@if [ -z "$(FORMAT_FILES)" ]; then echo "lint: 검사할 C 파일이 아직 없습니다"; \
+	else clang-format --dry-run --Werror $(FORMAT_FILES) && echo "lint: 위반 없음"; fi
 
 format:
-	@python3 scripts/convention.py format
+	@if [ -z "$(FORMAT_FILES)" ]; then echo "format: 고칠 C 파일이 아직 없습니다"; \
+	else clang-format -i $(FORMAT_FILES) && echo "format: 완료 (바뀐 줄은 git diff로 확인)"; fi
 
 # make release: 부하 테스트(ab, wrk, hey)용 빌드입니다. sanitizer는 서버를 몇 배 느리게
 # 만들어 처리량 숫자에 의미가 없으므로, sanitizer를 끄고 -O2로 build/release/에 따로
@@ -130,7 +136,7 @@ help:
 	@echo "make            개발 빌드 (ASan + UBSan): build/<이름>, build/test/<모듈>_test"
 	@echo "make test       단위 테스트 실행"
 	@echo "make functional 기능 테스트 실행 (실제 서버를 띄워 요청)"
-	@echo "make lint       코드 규칙 검사 (위반 시 실패)"
+	@echo "make lint       코드 모양 검사 (위반이나 설정 오류 시 실패)"
 	@echo "make format     코드 모양 자동 수정"
 	@echo "make verify     CI와 같은 전체 검증: all + test + functional + lint"
 	@echo "make release    부하 테스트용 -O2 빌드: build/release/<이름>"

@@ -12,7 +12,8 @@ permissions:
 jobs:
   verify:
     name: verify (${{ matrix.os }})
-    # LMS: macOS와 Linux(WSL) 모두에서 빌드되고 같은 결과를 내야 합니다.
+    # 팀의 이식성 검증 방식입니다. LMS는 macOS와 Linux에서 같은 코드가 돌기를
+    # 요구하므로, 두 OS에서 같은 검증을 돌려 차이를 일찍 찾습니다.
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +31,6 @@ jobs:
           python-version: '3.12'
       # make verify의 lint가 씁니다. 버전이 다르면 모양 판정이 달라지므로
       # CONVENTION.md의 설치 명령과 같은 버전을 씁니다.
-      - run: pip install clang-format==21.1.8 clang-tidy==21.1.6
-      - run: clang-format --version && clang-tidy --version
+      - run: pip install clang-format==21.1.8
+      - run: clang-format --version
       - run: make verify

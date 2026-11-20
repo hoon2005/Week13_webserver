@@ -10,7 +10,7 @@
    git merge origin/main
    ```
 
-3. **병합:** 승인 1건을 받은 후에 merge commit으로 합칩니다. 승인 후에 diff가 바뀌면 다시 승인을 받습니다.
+3. **병합:** 승인 수와 병합 방식은 팀 회의에서 정합니다(후보: 승인 1건 또는 2건 / merge commit 또는 squash). 승인 후에 diff가 바뀌면 다시 승인을 받습니다.
 4. **`main` 실패:** `main`의 CI가 실패하면 본 사람이 되돌리거나 고치는 일을 먼저 합니다.
 5. **커밋:** 첫 줄에 변경 목적과 결과를 한국어 문장으로 적습니다.
 
@@ -20,23 +20,23 @@
 
 6. **설명:** 작성자는 PR을 올리기 전에 본문과 diff를 읽고, 생성 파일과 비밀 정보가 없는지 확인합니다. 병합된 코드는 누가 작성했든 원리를 말로 설명할 수 있어야 합니다.
 7. **PR 본문:** `.github/pull_request_template.md`의 칸을 채웁니다. 특히 요청이 어디까지 처리되는지와 curl, 로그, 테스트로 확인하는 방법을 적습니다.
-8. **규칙 변경:** 이 파일도 PR과 승인 1건으로 변경합니다. GitHub 설정(브랜치 보호 등)은 PR로 바꿀 수 없으므로, PR에 적어 승인받은 뒤에 레포 오너가 반영합니다.
-9. **판정:** 빌드와 테스트 결과는 PR 하단의 CI에서 확인합니다. 검증 명령은 `make verify`입니다. CI도 같은 명령을 Ubuntu와 macOS에서 실행하므로, PR 전에 로컬에서 먼저 실행합니다.
+8. **규칙 변경:** 이 파일도 PR과 3번에서 정한 승인으로 변경합니다. GitHub 설정(브랜치 보호 등)은 PR로 바꿀 수 없으므로, PR에 적어 승인받은 뒤에 레포 오너가 반영합니다.
+9. **판정:** 빌드와 테스트 결과는 PR 하단의 CI에서 확인합니다. 검증 명령은 `make verify`입니다. CI는 같은 명령을 Ubuntu와 macOS에서 실행합니다. 두 OS에서 같은 검증을 돌려 OS 차이를 일찍 찾는 것이 팀의 이식성 검증 방식입니다. PR 전에 로컬에서 먼저 실행합니다.
 
 ## 개발 환경
 
-LMS에 따라 macOS 또는 Linux에서 개발합니다. Windows에서는 WSL2의 Ubuntu에서 개발합니다. Windows 폴더(`/mnt/c/...`)가 아닌 WSL 홈 폴더(`~/...`)에 레포를 받아야 빌드가 빠르고 파일 권한 문제가 없습니다.
+LMS에 따라 macOS 또는 Linux에서 개발합니다. Windows에서는 LMS가 허용한 WSL2+Ubuntu, Docker, 클라우드 중 하나를 씁니다. 어느 것을 쓸지는 팀이 정하며, 아래 설치 안내는 첫 후보인 WSL2+Ubuntu 기준입니다. WSL을 쓰면 Windows 폴더(`/mnt/c/...`)가 아닌 WSL 홈 폴더(`~/...`)에 레포를 받아야 빌드가 빠르고 파일 권한 문제가 없습니다.
 
 | 도구 | 쓰는 곳 | 설치 |
 | --- | --- | --- |
 | C 컴파일러, make | 빌드 | Ubuntu: `sudo apt install build-essential` / macOS: `xcode-select --install` |
-| python3 | 기능 테스트, `make lint` | Ubuntu와 macOS에 기본으로 있습니다 |
-| clang-format 21.1.8, clang-tidy 21.1.6 | `make lint`, `make format` | `pipx install clang-format==21.1.8` 과 `pipx install clang-tidy==21.1.6` |
+| python3 | 기능 테스트 | Ubuntu와 macOS에 기본으로 있습니다 |
+| clang-format 21.1.8 | `make lint`, `make format` | `pipx install clang-format==21.1.8` |
 | curl | 기능 확인 | Ubuntu: `sudo apt install curl` / macOS: 기본으로 있습니다 |
 | wrk 또는 ab | 부하 테스트 | Ubuntu: `sudo apt install wrk apache2-utils` / macOS: `brew install wrk` |
 
 - pipx가 없으면 Ubuntu는 `sudo apt install pipx`, macOS는 `brew install pipx`로 설치하고 `pipx ensurepath`를 한 번 실행합니다.
-- clang-format과 clang-tidy는 CI와 같은 버전을 씁니다. 버전이 다르면 서로의 줄을 계속 다시 포맷하게 됩니다.
+- clang-format은 CI와 같은 버전을 씁니다. 버전이 다르면 서로의 줄을 계속 다시 포맷하게 됩니다.
 
 ## 빌드 명령
 
@@ -44,7 +44,7 @@ LMS에 따라 macOS 또는 Linux에서 개발합니다. Windows에서는 WSL2의
 make            # 개발 빌드 (ASan + UBSan)
 make test       # 단위 테스트
 make functional # 기능 테스트
-make lint       # 코드 규칙 검사. 위반이 있으면 실패로 끝납니다
+make lint       # 코드 모양 검사. 위반이나 설정 오류가 있으면 실패로 끝납니다
 make format     # 코드 모양 자동 수정
 make verify     # CI와 같은 전체 검증
 make release    # 부하 테스트용 -O2 빌드 (sanitizer 없음)
@@ -67,26 +67,17 @@ make help       # 명령 목록
 
 빌드와 코드 검사의 언어 기준은 C11과 POSIX(`_POSIX_C_SOURCE=200809L`)입니다. LMS가 macOS와 Linux에서 같은 코드가 돌기를 요구하므로, POSIX 밖의 함수(`epoll`, `kqueue` 등)를 쓰면 `#ifdef`로 플랫폼을 나눕니다.
 
-모양은 `.clang-format`이 정합니다. Linux 스타일에 스페이스 4칸 들여쓰기, 항상 쓰는 중괄호, 80열을 더했습니다. 이름의 형식(snake_case, 상수는 대문자)과 길이는 `.clang-tidy`가 검사합니다. 아래 `이름`과 `함수` 규칙은 도구가 잡지 못하므로 리뷰에서 봅니다.
+모양은 `.clang-format`이 정하고, `make lint`(`clang-format --dry-run --Werror`)가 검사합니다. Linux 스타일에 스페이스 4칸 들여쓰기, 항상 쓰는 중괄호, 80열을 더했습니다. 아래 `이름`과 `함수` 규칙은 도구가 검사하지 않으므로 리뷰에서 봅니다.
 
-- **에디터:** clangd를 쓰면 `compile_flags.txt`를 읽고 `make lint`와 같은 경고를 바로 보여 줍니다. `.editorconfig`는 줄바꿈, 들여쓰기, 파일 끝 줄바꿈을 맞춥니다.
+- **에디터:** clangd를 쓰면 `compile_flags.txt`를 읽고 빌드와 같은 옵션으로 경고를 보여 줍니다. `.editorconfig`는 줄바꿈, 들여쓰기, 파일 끝 줄바꿈을 맞춥니다.
 - **검사 대상:** `make lint`와 `make format`은 git이 아는 파일만 봅니다. 새 파일은 `git add`한 뒤에 검사됩니다.
-- **가져온 코드:** `.clang-format-ignore`에 적은 파일(`tests/acutest.h`)은 포맷과 이름 검사에서 뺍니다. 원본과 대조할 수 있게 원래 모양을 지킵니다.
+- **가져온 코드:** `.clang-format-ignore`에 적은 파일(`tests/acutest.h`)은 clang-format이 건너뜁니다. 원본과 대조할 수 있게 원래 모양을 지킵니다.
 - **외부 라이브러리:** LMS가 완성된 HTTP 또는 이벤트 루프 라이브러리(libevent, libuv, mongoose 등)를 금지합니다. 표준 C 라이브러리와 POSIX API만 씁니다. 테스트 도구(`acutest.h`)는 제품 코드에 링크하지 않습니다.
-- **Markdown의 물결표:** 범위는 `1\~3`처럼 `\~`로 씁니다. GitHub는 `~` 두 개 사이의 글자를 취소선으로 그립니다. `make lint`가 코드 밖의 `~`를 찾고, `make format`이 `\~`로 고칩니다.
 - **줄바꿈:** `.gitattributes`가 모든 텍스트 파일을 LF로 고정합니다. Windows에서 받은 파일이 CRLF이면 WSL의 `make`와 Python 스크립트가 깨지기 때문입니다.
 
 ### 이름
 
-1. **변수 이름은 담는 것의 역할을 단어로 적습니다.** 도구는 3글자 미만만 막으므로 `buf`, `tmp`처럼 3글자 이상인 줄임말은 리뷰에서 봅니다. 예외는 반복 변수 `i`, `j`, `k`, 매개변수 `n`, 파일 디스크립터 `fd`입니다.
-
-   ```c
-   /* 오답 */
-   char *buf = malloc(line_len + 1);
-
-   /* 정답 */
-   char *line_copy = malloc(line_len + 1);
-   ```
+1. **이름은 `snake_case`로 짓고, 상수와 매크로는 대문자로 짓습니다**(`request_parse`, `HEADER_SIZE_MAX`).
 
 2. **다른 파일에서 부르는 함수는 `모듈_동사`로 짓습니다.** 이름만 보고 어느 파일에 있는지 알 수 있습니다. 파일 안의 `static` 함수는 다루는 대상을 앞에 둡니다.
 3. **동사의 뜻은 하나로 고정합니다.**
@@ -111,7 +102,6 @@ make help       # 명령 목록
 
 1. **함수는 단계의 나열로 읽히게 씁니다.** 이름을 붙일 수 있는 독립된 작업은 분리했을 때 호출부가 더 읽기 쉬우면 동사 이름의 `static` 함수로 뺍니다. 자원 해제처럼 순서가 중요한 단계는 호출부에서 흐름이 보이게 씁니다.
 2. **파일은 위에서 아래로 읽히게 배치합니다.** 파일 위쪽에 `static` 함수 선언을 모으고, 공개 함수(실행 파일은 `main`)를 먼저 둡니다. helper는 공개 함수가 처음 부르는 순서대로 그 뒤에 둡니다.
-3. **함수의 마지막 `return` 위에 빈 줄 없이 이어진 줄이 3줄 이상이면, 그 `return` 앞에 빈 줄을 하나 둡니다.** 중간에서 빠져나가는 `return`과 본문이 짧은 함수에는 두지 않습니다.
 
 ## 테스트
 
@@ -140,8 +130,7 @@ make help       # 명령 목록
 
 | 내용 | 남는 곳 |
 | ---- | ------- |
-| 개인 PRD 초안, 최종 PRD, 구현 티켓 | `docs/prd/` (작성 방법은 `docs/prd/README.md`) |
-| 되돌리기 어려운 큰 결정과 그 이유 | `docs/adr/<결정을 줄인 영어 이름>.md` |
+| 개인 PRD 초안과 최종 PRD, 결정과 그 이유 | `docs/prd/` (작성 방법은 `docs/prd/README.md`) |
 | 부하 테스트 등 측정 결과 | `docs/measurements/<세 자리 번호>-<이름>-<주제>.md` |
 | 작은 이유 | 그 코드 줄의 주석 |
 | 엣지 케이스 | 테스트 이름 |
