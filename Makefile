@@ -67,11 +67,13 @@ functional: $(PROGRAMS)
 
 verify: all test functional lint
 
-# 코드 모양 검사입니다(CONVENTION.md의 "코드"). 모양은 .clang-format이 정하고,
-# .clang-format-ignore에 적은 파일은 clang-format이 스스로 건너뜁니다.
+# 코드 모양 검사입니다(CONVENTION.md의 "코드"). 모양은 .clang-format이 정합니다.
 # git이 아는 파일만 봅니다. 새 파일은 git add 뒤에 검사됩니다.
+# .clang-format-ignore에 적은 경로는 목록에서 미리 뺍니다. 그래야 검사할 파일이
+# 없을 때 "위반 없음" 대신 "검사할 C 파일이 아직 없습니다"가 나옵니다.
 # lint는 위반이나 설정 오류가 있으면 실패로 끝나고(--Werror), format은 파일을 고칩니다.
-FORMAT_FILES = $(shell git ls-files -- 'src/*.c' 'src/*.h' 'tests/*.c' 'tests/*.h')
+FORMAT_IGNORE := $(shell cat .clang-format-ignore 2>/dev/null)
+FORMAT_FILES   = $(filter-out $(FORMAT_IGNORE),$(shell git ls-files -- 'src/*.c' 'src/*.h' 'tests/*.c' 'tests/*.h'))
 
 lint:
 	@if [ -z "$(FORMAT_FILES)" ]; then echo "lint: 검사할 C 파일이 아직 없습니다"; \

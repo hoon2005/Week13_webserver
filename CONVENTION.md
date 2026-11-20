@@ -65,7 +65,7 @@ make help       # 명령 목록
 
 ## 코드
 
-빌드와 코드 검사의 언어 기준은 C11과 POSIX(`_POSIX_C_SOURCE=200809L`)입니다. LMS가 macOS와 Linux에서 같은 코드가 돌기를 요구하므로, POSIX 밖의 함수(`epoll`, `kqueue` 등)를 쓰면 `#ifdef`로 플랫폼을 나눕니다.
+빌드와 코드 검사의 언어 기준은 C11과 POSIX(`_POSIX_C_SOURCE=200809L`)입니다. LMS는 한 소스를 여러 환경(macOS, WSL, Linux)에서 빌드하려면 이식성을 고려하라고 합니다. 팀원마다 OS가 다를 수 있으므로, POSIX 안에 머물고 POSIX 밖의 함수(`epoll`, `kqueue` 등)를 쓰면 `#ifdef`로 플랫폼을 나눕니다.
 
 모양은 `.clang-format`이 정하고, `make lint`(`clang-format --dry-run --Werror`)가 검사합니다. Linux 스타일에 스페이스 4칸 들여쓰기, 항상 쓰는 중괄호, 80열을 더했습니다. 아래 `이름`과 `함수` 규칙은 도구가 검사하지 않으므로 리뷰에서 봅니다.
 

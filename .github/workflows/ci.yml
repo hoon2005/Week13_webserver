@@ -12,8 +12,7 @@ permissions:
 jobs:
   verify:
     name: verify (${{ matrix.os }})
-    # 팀의 이식성 검증 방식입니다. LMS는 macOS와 Linux에서 같은 코드가 돌기를
-    # 요구하므로, 두 OS에서 같은 검증을 돌려 차이를 일찍 찾습니다.
+    # 팀의 이식성 검증 방식입니다. 두 OS에서 같은 검증을 돌려 OS 차이를 일찍 찾습니다.
     strategy:
       fail-fast: false
       matrix:
