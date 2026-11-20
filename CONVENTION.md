@@ -30,13 +30,21 @@
 | 도구 | 쓰는 곳 | 설치 |
 | --- | --- | --- |
 | C 컴파일러, make | 빌드 | Ubuntu: `sudo apt install build-essential` / macOS: `xcode-select --install` |
-| python3 | 기능 테스트 | Ubuntu와 macOS에 기본으로 있습니다 |
+| python3 | 기능 테스트 | Ubuntu: 기본으로 있습니다 / macOS: 위의 `xcode-select --install`로 함께 설치됩니다 |
 | clang-format 21.1.8 | `make lint`, `make format` | `pipx install clang-format==21.1.8` |
 | curl | 기능 확인 | Ubuntu: `sudo apt install curl` / macOS: 기본으로 있습니다 |
 | wrk 또는 ab | 부하 테스트 | Ubuntu: `sudo apt install wrk apache2-utils` / macOS: `brew install wrk` |
 
-- pipx가 없으면 Ubuntu는 `sudo apt install pipx`, macOS는 `brew install pipx`로 설치하고 `pipx ensurepath`를 한 번 실행합니다.
+- macOS의 `brew` 명령은 Homebrew가 있어야 동작합니다. Homebrew는 macOS에 기본으로 들어 있지 않으므로, 없으면 https://brew.sh 안내대로 먼저 설치합니다.
+- pipx가 없으면 Ubuntu는 `sudo apt install pipx`, macOS는 `brew install pipx`로 설치하고 `pipx ensurepath`를 한 번 실행합니다. 그다음 터미널을 새로 엽니다.
 - clang-format은 CI와 같은 버전을 씁니다. 버전이 다르면 서로의 줄을 계속 다시 포맷하게 됩니다.
+- 설치가 끝나면 아래 명령으로 도구를 확인합니다. C 파일과 테스트가 없을 때는 `make verify`가 컴파일러, python3, clang-format을 실행하지 않습니다. 그래서 `make verify`가 통과해도 도구가 설치됐는지는 알 수 없습니다.
+
+  ```bash
+  cc --version
+  python3 --version
+  clang-format --version   # 21.1.8이어야 합니다
+  ```
 
 ## 빌드 명령
 
