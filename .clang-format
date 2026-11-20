@@ -1,0 +1,21 @@
+# 팀 C 코드 모양: Linux 커널 스타일에서 두 가지를 바꿨습니다.
+#   1. 8칸 탭 대신 스페이스 4칸 들여쓰기
+#   2. 문장이 하나여도 중괄호를 항상 씁니다
+# 에디터(clangd)와 `make format`이 모두 이 파일을 읽습니다.
+BasedOnStyle: LLVM
+BreakBeforeBraces: Linux
+IndentWidth: 4
+ContinuationIndentWidth: 4
+UseTab: Never
+ColumnLimit: 80
+InsertBraces: true
+SpaceBeforeParens: ControlStatements
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+IndentCaseLabels: false
+PointerAlignment: Right
+SortIncludes: Never
+ReflowComments: false

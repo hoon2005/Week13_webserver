@@ -1,0 +1,23 @@
+# 팀 이름 규칙과 중괄호 규칙(CONVENTION.md의 "코드")입니다. clangd가 에디터에서
+# 바로 경고로 보여 주고, `make lint`가 같은 검사를 합니다.
+# 규칙 검사만 켭니다. 버그 찾기는 `make test`의 ASan과 UBSan이 맡습니다.
+Checks: '-*,readability-identifier-naming,readability-braces-around-statements,readability-identifier-length'
+CheckOptions:
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.StructCase: lower_case
+  readability-identifier-naming.UnionCase: lower_case
+  readability-identifier-naming.EnumCase: lower_case
+  readability-identifier-naming.EnumConstantCase: UPPER_CASE
+  readability-identifier-naming.TypedefCase: lower_case
+  # 함수처럼 쓰는 매크로는 소문자도 허용합니다(list_entry 등).
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+  readability-identifier-naming.MacroDefinitionIgnoredRegexp: '^[a-z][a-z0-9_]*$'
+  # 이름은 담는 것을 말해야 하므로 두 글자는 너무 짧습니다. 기본값대로
+  # 반복 변수 i, j, k와 매개변수 n은 허용합니다.
+  readability-identifier-length.MinimumVariableNameLength: 3
+  readability-identifier-length.MinimumParameterNameLength: 3
+  # fd는 POSIX에서 파일 디스크립터를 부르는 이름입니다.
+  readability-identifier-length.IgnoredVariableNames: '^fd$'
+  readability-identifier-length.IgnoredParameterNames: '^(n|fd)$'
