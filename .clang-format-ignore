@@ -2,3 +2,7 @@
 # `make format`, 에디터)이 이 파일에 적은 경로를 건너뜁니다.
 # acutest.h: https://github.com/mity/acutest, 받은 그대로 둡니다.
 tests/acutest.h
+src/main/tiny.c
+src/main/adder.c
+src/csapp.c
+src/csapp.h
