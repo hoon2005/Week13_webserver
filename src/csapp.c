@@ -200,7 +200,8 @@ void Sigdelset(sigset_t *set, int signum)
 int Sigismember(const sigset_t *set, int signum)
 {
     int rc;
-    if ((rc = sigismember(set, signum)) < 0)
+    rc = sigismember(set, signum);
+    if (rc < 0)
 	unix_error("Sigismember error");
     return rc;
 }
@@ -721,8 +722,11 @@ void Pthread_once(pthread_once_t *once_control, void (*init_function)()) {
 
 void Sem_init(sem_t *sem, int pshared, unsigned int value) 
 {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     if (sem_init(sem, pshared, value) < 0)
 	unix_error("Sem_init error");
+#pragma GCC diagnostic pop
 }
 
 void P(sem_t *sem) 
