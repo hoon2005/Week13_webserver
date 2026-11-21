@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    # 팀의 이식성 검증 방식입니다. 두 OS에서 같은 검증을 돌려 OS 차이를 일찍 찾습니다.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # 러너 커널의 주소 무작위화 비트가 크면 AddressSanitizer가 시작하지 못하는
+      # 경우가 있어 줄입니다. Linux 커널 설정이라 Linux에서만 실행합니다.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      # 두 OS에서 같은 python과 pip를 쓰게 합니다.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # make verify의 lint가 씁니다. 버전이 다르면 모양 판정이 달라지므로
+      # CONVENTION.md의 설치 명령과 같은 버전을 씁니다.
+      - run: pip install clang-format==21.1.8
+      - run: clang-format --version
+      - run: make verify
