@@ -7,6 +7,7 @@
  *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
  */
 #include "csapp.h"
+#include <strings.h>
 
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
@@ -131,7 +132,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
 	return 1;
     }
     else {  /* Dynamic content */                        //line:netp:parseuri:isdynamic
-	ptr = index(uri, '?');                           //line:netp:parseuri:beginextract
+	ptr = strchr(uri, '?');                          //line:netp:parseuri:beginextract
 	if (ptr) {
 	    strcpy(cgiargs, ptr+1);
 	    *ptr = '\0';
@@ -152,7 +153,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs)
 void serve_static(int fd, char *filename, int filesize)
 {
     int srcfd;
-    char *srcp, filetype[MAXLINE], buf[MAXBUF];
+    char *srcp, filetype[64], buf[MAXBUF];
 
     /* Send response headers to client */
     get_filetype(filename, filetype);    //line:netp:servestatic:getfiletype
