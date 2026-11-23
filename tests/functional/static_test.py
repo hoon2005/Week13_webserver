@@ -12,6 +12,7 @@ import os
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,10 @@ import baseline_test as base
 
 # 서버가 받는 줄 하나의 최대 길이('\n' 포함)입니다. src/request.h의 REQUEST_LINE_SIZE - 1.
 LINE_MAX = 8191
+
+# 응답 도중 끊기 테스트용 파일 크기입니다. 소켓 버퍼(보통 수 MB)보다 커야 서버가
+# 아직 쓰고 있는 동안 연결이 끊깁니다.
+BIG_FILE_SIZE = 32 * 1024 * 1024
 
 
 class StaticTest(unittest.TestCase):
@@ -41,6 +46,7 @@ class StaticTest(unittest.TestCase):
         cls.write_file("sub/page.html", b"<p>sub</p>\n")
         cls.write_file("empty.txt", b"")
         cls.write_file("a..b.html", b"<p>dots</p>\n")
+        cls.write_file("big.txt", b"x" * BIG_FILE_SIZE)
         cls.secret = cls.write_file("secret.html", b"<p>secret</p>\n")
         os.chmod(cls.secret, 0)
 
@@ -173,6 +179,28 @@ class StaticTest(unittest.TestCase):
     def test_읽기_권한_없는_파일은_403이다(self):
         status, _, _ = self.get("/secret.html")
         self.assertEqual(status, 403)
+
+    def test_큰_파일을_받다가_손님이_끊어도_서버는_살아_있다(self):
+        with socket.create_connection(
+            (base.HOST, self.port), timeout=base.REQUEST_TIMEOUT_SEC
+        ) as sock:
+            sock.sendall(b"GET /big.txt HTTP/1.0\r\n\r\n")
+            self.assertTrue(sock.recv(4096).startswith(b"HTTP/1.0 200"))
+            # 닫을 때 FIN 대신 RST를 보내게 해서, 서버의 다음 write가 바로 실패하게 합니다.
+            sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+        self.assert_server_alive()
+
+    def test_요청만_보내고_바로_닫은_손님에게_쓰다가_SIGPIPE가_나도_서버는_살아_있다(self):
+        # 손님이 먼저 FIN을 보내면 서버 소켓은 CLOSE_WAIT이 됩니다. 서버의 첫 write에
+        # 손님 커널이 RST로 답하고, 그 뒤의 write는 EPIPE와 함께 SIGPIPE를 받습니다.
+        # SIGPIPE를 무시하지 않으면 여기서 서버가 죽습니다.
+        with socket.create_connection(
+            (base.HOST, self.port), timeout=base.REQUEST_TIMEOUT_SEC
+        ) as sock:
+            sock.sendall(b"GET /big.txt HTTP/1.0\r\n\r\n")
+        self.assert_server_alive()
 
     # 경로 규칙 (Q17, Q18, Q27)
 

@@ -30,6 +30,16 @@ int main(int argc, char **argv)
 	exit(1);
     }
 
+    /*
+     * 끊긴 연결에 쓰면 SIGPIPE의 기본 동작으로 서버가 죽습니다. 무시하면 write가
+     * EPIPE로 실패를 돌려주고, 그 연결만 정리합니다. 무시 설정은 execve 뒤에도
+     * 남으므로 CGI 자식은 실행 전에 기본 동작으로 되돌립니다.
+     */
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        fprintf(stderr, "%s: cannot ignore SIGPIPE\n", argv[0]);
+        exit(1);
+    }
+
     listenfd = net_open_listen(argv[1]);
     if (listenfd < 0) {
         fprintf(stderr, "%s: cannot listen on port %s\n", argv[0], argv[1]);
@@ -138,6 +148,10 @@ void serve_dynamic(int fd, char *filename, char *cgiargs)
     Rio_writen(fd, buf, strlen(buf));
 
     if (Fork() == 0) { /* Child */ //line:netp:servedynamic:fork
+        /* 서버가 무시하는 SIGPIPE를 CGI 프로그램에서는 기본 동작으로 되돌립니다. */
+        if (signal(SIGPIPE, SIG_DFL) == SIG_ERR) {
+            _exit(1);
+        }
 	/* Real server would set all CGI vars here */
 	setenv("QUERY_STRING", cgiargs, 1); //line:netp:servedynamic:setenv
 	Dup2(fd, STDOUT_FILENO);         /* Redirect stdout to client */ //line:netp:servedynamic:dup2
