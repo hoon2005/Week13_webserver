@@ -41,8 +41,12 @@
 | **M5** chunked | `501`. CL과 같이 오면 `400` + 연결 닫기 | 범위 제한. 같이 오면 request smuggling 위험 |
 | **M5** 본문 저장 | malloc 버퍼에 다 읽음 (상한 1 MiB) → CGI에 pipe로 | 큰 본문 엣지 케이스를 막는 것은 스트리밍이 아니라 상한 |
 | **M5** `Expect: 100-continue` | 답함 (`100 Continue` 또는 바로 오류) | 단순하고, 큰 본문을 받기 전에 `413`으로 거절 가능. 무시하면 curl이 1초씩 기다림 |
-| **M5** 본문 오류 | 없음 `411`, 잘못된 값 `400`, 너무 큼 `413`, chunked `501`, 모르는 Expect `417` | |
-| **M5** 메서드 | GET, POST (+ 정적 파일 HEAD는 회의에서 결정) | PATCH, DELETE는 파일 서버가 직접 처리할 일이 아님. 프록시에서는 그대로 전달 |
+| **M5** 본문 오류 | 없음 `411`, 잘못된 값 `400`, 너무 큼 `413`, chunked `501`, 모르는 Expect `417` | 404/403/500은 이미 있음. POST 본문 처리와 엣지 케이스("잘못된 HTTP 요청", "매우 큰 요청 본문")에 답하려고 추가. 꼭 구분할 것은 `400`, `413`이고 나머지는 원인을 정확히 알리려고 나눔 |
+| **M5** 메서드 | GET, POST, **HEAD** (HEAD는 정적 파일만, CGI에 HEAD는 `501`). 그 외는 `501` | HEAD는 본문 없이 정보만 받는 용도이고 GET에서 본문만 빼면 됨. PATCH, DELETE는 파일 서버가 직접 처리할 일이 아님. 프록시에서는 그대로 전달 |
+| **M5** keep-alive 닫는 시점 | idle 타임아웃(M4의 읽기 타임아웃 5초) + 연결당 요청 수 상한 100 (실행 인자로 변경 가능) | 타임아웃은 놀고 있는 연결을, 요청 수 상한은 쉬지 않고 요청하는 한 손님의 작업자 독점을 막음. 둘 다 구현이 작음. 연결 수명 상한은 요청 수 상한과 효과가 겹쳐 생략, 바쁠 때 닫기는 여유 있으면 확장 |
+| **M5** 응답 형식 | 상태 줄 `HTTP/1.1`. 모든 응답(오류 포함)에 `Content-Length`와 `Connection` | 과제가 `HTTP/1.1 200 OK`를 명시. keep-alive에서는 클라이언트가 응답 끝을 알아야 다음 요청을 보낼 수 있음 (지금 오류 응답에는 Content-Length가 없음) |
+| **M5** CGI 응답 구조 | CGI 출력을 파이프로 받아 끝까지 모은 뒤 서버가 응답을 만듦 (출력 상한 1 MiB). 실패하면 `500`, 시간 초과면 CGI를 끝내고 `504` | 지금은 200을 fork 전에 보내서 CGI가 실패해도 500을 못 보내고, CGI가 소켓에 직접 써서 응답 길이를 몰라 keep-alive도 안 됨. 모아서 확인한 뒤 보내면 둘 다 해결. 요청 본문의 버퍼링 + 상한과 같은 생각 |
+| **M5** MIME | HTML, CSS, JS, PNG, JPG (+ 기존 GIF). 표에 없으면 `text/plain` | 과제 명시 목록. 지금 `FILE_TYPES` 표에 CSS(`text/css`), JS(`text/javascript`)를 한 줄씩 추가 |
 
 # 고민한 흔적
 
@@ -395,7 +399,7 @@ SIGINT(Ctrl+C)와 SIGTERM(`kill`, `docker stop`)의 기본 동작은 즉시 종�
 | --- | --- | --- |
 | `Transfer-Encoding: chunked` 해석 | `501` | 과제 문구가 "`Content-Length` 기반 본문 길이 처리". `curl -d`와 HTML form은 Content-Length로 보냄. 여유가 있으면 확장 (아래 [다시 검토할 조건](#다시-검토할-조건)) |
 | 본문 스트리밍 | 버퍼링만 | 이번 POST는 form 데이터 수준. 아래 설계 선택 3 |
-| keep-alive 반복 처리 | 이번엔 `Connection` 값 저장까지만 | 같은 연결에서 `doit`을 반복하는 일은 M5의 keep-alive 항목에서 함. 다만 이 문서의 규칙(본문을 정확히 다 읽기, 경계가 불확실하면 연결 닫기)이 그 전제 조건임 |
+| CGI 출력 스트리밍 | 버퍼링만 | 우리 CGI(adder) 출력은 수백 바이트. 아래 설계 선택 6 |
 | `Host` 기반 라우팅 | 저장과 검사만 | Proxy 단계에서 씀 |
 
 ## 설계 선택
@@ -476,8 +480,111 @@ curl은 POST 본문이 일정 크기(보통 1KB)를 넘으면 `Expect: 100-conti
 | `100-continue`가 아닌 Expect 값 | `417 Expectation Failed` |
 | HTTP/1.0 요청 | Expect 무시 (100 Continue는 HTTP/1.1에만 있음) |
 
+### 5. keep-alive: 연결을 언제 닫을까?
+
+같은 연결에서 요청을 여러 번 처리합니다. 작업자는 연결 하나를 받아 요청 처리를 반복하고, 닫을 조건이 되면 닫습니다.
+
+```c
+rio_readinitb(&rio, connfd);   /* 연결당 한 번만 */
+for (n = 1; ; n++) {
+    keep = handle_request(connfd, &rio, n < KEEPALIVE_MAX);  /* 요청 하나 처리, 유지할지 돌려줌 */
+    if (!keep) break;
+}
+close(connfd);
+```
+
+- **`rio`는 연결당 한 번만 초기화합니다.** 클라이언트가 요청을 연달아 보내면(파이프라이닝) 다음 요청 앞부분이 이미 rio 버퍼에 들어와 있을 수 있습니다. 지금은 `doit` 안에서 rio를 만들므로 바깥으로 옮깁니다.
+- **다음 요청의 시작:** 요청 줄, 헤더, 빈 줄, 본문(정확히 Content-Length 바이트)을 다 읽으면 그다음 바이트가 다음 요청입니다. 설계 선택 2~3의 규칙(본문을 정확히 다 읽기, 처리하지 않는 본문도 읽고 버리기)이 그 전제입니다.
+
+**연결을 유지할지는 요청과 서버 상황으로 정합니다.**
+
+| 조건 | 결정 |
+| --- | --- |
+| HTTP/1.1, Connection 헤더 없음 또는 `keep-alive` | 유지 |
+| HTTP/1.1, `Connection: close` | 응답 후 닫음 |
+| HTTP/1.0, Connection 헤더 없음 | 응답 후 닫음 |
+| HTTP/1.0, `Connection: keep-alive` | 유지 |
+| 본문 경계를 모르는 오류 (`400`, `411`, `413`, `417`, `501`) | 응답 후 닫음 |
+| CGI 응답 | 정적 파일과 같이 유지. 서버가 CGI 출력을 모아 길이를 세므로 (설계 선택 6) |
+| 이 연결의 요청 수가 상한에 도달 | 응답 후 닫음 |
+| 다음 요청 줄을 읽었는데 0 (클라이언트가 끊음) | 조용히 닫음 |
+| 다음 요청이 타임아웃 안에 안 옴 | 조용히 닫음 |
+
+닫기로 했으면 응답에 `Connection: close`를 넣습니다. HTTP/1.0 요청에 유지할 때는 `Connection: keep-alive`를 넣습니다.
+
+**클라이언트가 계속 유지하려 할 때 서버가 언제 끊을지는 네 가지 방식을 비교했습니다.**
+
+| 방식 | 막는 문제 | 구현 | 결정 |
+| --- | --- | --- | --- |
+| idle 타임아웃 | 놀고 있는 연결이 작업자를 붙잡음 | M4의 읽기 타임아웃 그대로 | **사용** |
+| 연결당 요청 수 상한 | 쉬지 않고 요청하는 손님이 작업자를 독점 | 카운터 하나 | **사용 (100)** |
+| 연결 수명 상한 | 가끔 요청해서 타임아웃에 안 걸리는 연결 | 시간 계산 | 요청 수 상한과 효과가 겹쳐 생략 |
+| 바쁠 때 닫기 | 큐에 기다리는 손님이 있으면 keep-alive를 포기 | 큐 상태 확인 (락 필요) | 여유 있으면 확장 |
+
+- **idle 타임아웃:** M4의 읽기 타임아웃(5초)을 그대로 씁니다. 첫 요청을 기다릴 때와 요청 사이를 기다릴 때를 같은 값으로 둡니다. 요청 사이만 더 짧게(예: 2초) 하면 작업자를 더 빨리 돌려받지만, 요청마다 `setsockopt`를 다시 걸어야 해서 이번에는 한 값으로 갑니다.
+- **요청 수 상한:** 100은 Apache의 `MaxKeepAliveRequests` 기본값입니다. 닫히면 클라이언트가 다시 연결하면서 큐 뒤에 줄을 서므로 다른 손님에게도 차례가 갑니다. 실행 인자 `--keepalive-max N`으로 바꿀 수 있게 해서 부하 테스트로 비교합니다.
+- **바쁠 때 닫기**는 스레드 풀의 약점(놀고 있는 연결이 작업자를 붙잡음)을 직접 겨냥하는 방식이라, 스레드 풀을 유지한다면 다음 확장으로 좋습니다. 이벤트 루프로 넘어가면 이 문제 자체가 사라집니다.
+
+### 6. CGI 응답 구조
+
+지금 구조에는 문제가 두 가지 있습니다.
+
+```text
+서버 → 소켓: "HTTP/1.0 200 OK\r\nServer: ...\r\n"   ← fork 전에 먼저 보냄
+fork → 자식: dup2(소켓 → stdout) → execve(adder)
+adder → 소켓: 나머지 헤더와 본문을 직접 씀
+서버: waitpid → close
+```
+
+- **500을 못 보냅니다.** 200을 먼저 보내서, CGI가 실패하면 클라이언트는 200인데 본문이 빈 응답을 받습니다.
+- **keep-alive를 못 합니다.** CGI가 소켓에 직접 써서 서버는 응답이 어디서 끝나는지 모릅니다.
+
+| 방식 | CGI 실패 시 500 | CGI keep-alive | 메모리 | 구현 |
+| --- | --- | --- | --- | --- |
+| A. 지금 그대로 + CGI 뒤에는 닫기 | 못 보냄 | 안 됨 | 적음 | 없음 |
+| **B. 파이프로 받아 전부 모은 뒤 응답** | **보냄** | **됨** | 출력 크기 (상한) | 중간 |
+| C. 파이프로 받으며 바로 보내기 (chunked 응답) | 헤더를 보낸 뒤에는 못 보냄 | 됨 | 적음 | 중간 |
+| D. 일정 크기까지 모으고, 넘으면 스트리밍 | 작은 출력만 | 됨 | 상한까지 | 큼 |
+
+**B로 합니다.** 앞에서 남겨 둔 CGI 500 문제와 keep-alive 문제가 같이 풀립니다. 요청 본문에서 고른 "버퍼링 + 상한"을 응답 쪽에도 똑같이 적용하는 것이라, 양방향 모두 "모아서 확인한 뒤 넘긴다"로 통일됩니다. 우리 CGI(adder)의 출력은 수백 바이트라 메모리 걱정도 없습니다. 나중에 Reverse Proxy에서 백엔드 응답을 다 받아 두고 보낼지 고민할 때도 이 구조를 재사용할 수 있습니다.
+
+```text
+fork 전: 입력 파이프(본문용), 출력 파이프 생성, envp 준비
+자식:    dup2(입력 파이프 → stdin), dup2(출력 파이프 → stdout) → execve
+부모:    입력 파이프에 본문을 쓰고 닫음 (CGI가 EOF를 알게)
+         출력 파이프를 EOF까지 읽어 버퍼에 모음 (상한 1 MiB, 시간 제한 10초)
+         waitpid로 종료 상태 확인
+         → 정상 종료 + 출력이 올바름: 서버가 응답을 만들어 보냄
+         → 그 외: 500 또는 504
+```
+
+**CGI 출력 해석 (CGI 표준):** CGI는 상태 줄 없이 `헤더 몇 줄 + 빈 줄 + 본문`을 출력합니다. 서버는 빈 줄에서 헤더와 본문을 나누고 응답을 만듭니다.
+
+| 항목 | 처리 |
+| --- | --- |
+| 상태 줄 | CGI가 `Status: 404 Not Found` 헤더를 주면 그 값, 없으면 `HTTP/1.1 200 OK` |
+| `Content-Type` 등 CGI 헤더 | 그대로 전달 |
+| `Content-Length` | 서버가 센 본문 길이로 직접 씀 (CGI가 쓴 값은 무시) |
+| `Connection` | 서버가 keep-alive 규칙(설계 선택 5)으로 직접 씀 (CGI가 쓴 값은 무시) |
+| HEAD 요청 | 이번에는 CGI에 HEAD를 지원하지 않음 (`501`). 이 구조에서는 본문만 빼면 되므로 나중에 쉽게 추가 가능 |
+
+**실패 처리:** 응답을 보내기 전에 확인하므로 모두 오류 응답을 보낼 수 있습니다.
+
+| 상황 | 응답 |
+| --- | --- |
+| `execve` 실패, CGI가 0이 아닌 값으로 종료, 시그널로 죽음 | `500` |
+| 출력이 비었거나 헤더와 본문을 나누는 빈 줄이 없음 | `500` |
+| 출력이 상한(1 MiB)을 넘음 | CGI를 `kill`, `500` |
+| 출력을 10초 안에 다 내지 않음 | CGI를 `kill`, `504 Gateway Timeout` |
+| fork, pipe 실패 | `500` |
+
+- **시간 제한:** 지금은 CGI가 끝나지 않으면 작업자가 `waitpid`에서 무한정 기다립니다. 출력 파이프를 읽을 때 시간 제한을 두고, 넘으면 `kill` 후 `waitpid`로 회수해 좀비를 남기지 않습니다. 실패(`500`)와 시간 초과(`504`)를 나누면 원인을 구분하기 쉽습니다.
+- **adder 수정:** adder가 출력하는 `Connection: close`, `Content-length`는 CGI 표준상 서버가 정할 값이므로 뺍니다. `Content-type`과 본문만 출력합니다.
+- **교착 한계:** 서버는 본문을 다 쓴 뒤에 출력을 읽습니다. 그런데 CGI가 입력을 다 읽기 전에 파이프 버퍼(보통 64KB)보다 많이 출력하면, 서버는 쓰기에서, CGI는 출력에서 서로 기다리는 교착이 생깁니다. adder처럼 입출력이 작으면 생기지 않습니다. 완전히 막으려면 `poll`로 두 파이프를 같이 다뤄야 하며, 이번에는 한계로 남깁니다. 시간 제한(10초)이 있어서 교착이 생겨도 작업자가 영원히 묶이지는 않습니다.
+
 ### 다시 검토할 조건
 
+- CGI 출력이 커져서(예: 파일 다운로드를 CGI로 생성) 1 MiB 상한이 문제가 되면 C(chunked 스트리밍)나 D(섞기)를 검토합니다.
 - 파일 업로드처럼 1 MiB를 넘는 본문을 **정상으로** 받아야 하면 스트리밍을 검토합니다.
 - chunked로 보내는 클라이언트를 지원해야 하면 chunked 디코딩을 추가합니다. RFC 7230은 HTTP/1.1 수신자가 chunked를 해석할 수 있어야 한다(MUST)고 정하므로, 이번 `501`은 표준을 다 지킨 것이 아니라 **범위 제한**입니다. 조각을 모아 버퍼에 붙이고 모은 길이를 `CONTENT_LENGTH`로 넘기면 되므로 버퍼링 구조에 그대로 들어갑니다.
 
@@ -497,35 +604,43 @@ curl은 POST 본문이 일정 크기(보통 1KB)를 넘으면 `Expect: 100-conti
   → 본문 읽기          같은 rio로 rio_readnb(&rio, body, 7)
                        7바이트보다 적게 오면(연결 끊김) free 후 종료
   → URI 확인, 해석, 파일 찾기, 권한 확인 (지금과 같음)
-  → CGI 실행           pipe 생성 → fork
-                       자식: 파이프 읽는 쪽을 STDIN으로, 소켓을 STDOUT으로 dup2
-                             REQUEST_METHOD=POST, CONTENT_LENGTH=7,
-                             CONTENT_TYPE 설정 → execve
-                       부모: 파이프 쓰는 쪽에 본문 7바이트 쓰고 닫음 (CGI가 EOF를 알게)
-                             → waitpid → body free
+  → CGI 실행           입력·출력 파이프 생성, envp 준비
+                       (REQUEST_METHOD=POST, CONTENT_LENGTH=7, CONTENT_TYPE) → fork
+                       자식: 입력 파이프를 STDIN으로, 출력 파이프를 STDOUT으로 dup2 → execve
+                       부모: 입력 파이프에 본문 7바이트 쓰고 닫음 (CGI가 EOF를 알게)
+                             → 출력 파이프를 EOF까지 읽어 모음 → waitpid
+  → 응답               CGI 출력을 헤더와 본문으로 나눔
+                       "HTTP/1.1 200 OK" + Content-type + Content-Length(서버가 셈)
+                       + Connection → 본문 → body와 출력 버퍼 free
 ```
 
 구현할 때 주의할 점입니다.
 
 - **본문은 반드시 헤더를 읽은 같은 `rio`로 읽습니다.** `rio_readlineb`는 소켓에서 넉넉히 읽어 두기 때문에 본문 앞부분이 이미 rio 버퍼에 있을 수 있습니다. 소켓에서 `read`를 직접 하면 그 앞부분을 잃습니다.
 - **GET에 본문이 붙어 와도 읽어서 버립니다** (상한 적용). 읽지 않으면 keep-alive에서 그 본문이 다음 요청으로 읽힙니다.
-- **CGI가 stdin을 읽지 않고 끝나도 서버는 멈추지 않습니다.** 부모의 파이프 쓰기가 `EPIPE`로 실패하는데, `SIGPIPE`는 이미 무시하므로 그 요청만 끝냅니다. 본문이 파이프 버퍼(보통 64KB)보다 크면 부모가 쓰기에서 잠시 기다릴 수 있지만, 자식은 출력을 파이프가 아니라 소켓에 쓰므로 서로 기다리는 교착은 생기지 않습니다.
+- **CGI가 stdin을 읽지 않고 끝나도 서버는 멈추지 않습니다.** 부모의 파이프 쓰기가 `EPIPE`로 실패하는데, `SIGPIPE`는 이미 무시하므로 쓰기를 멈추고 출력 읽기로 넘어갑니다. 입출력이 모두 클 때의 교착은 설계 선택 6의 한계를 봅니다.
 - **본문 경계를 확신할 수 없는 오류**(CL+TE, 잘못된 CL, 본문 도중 끊김, Expect 거절)는 응답 후 **연결을 닫습니다.**
-- `adder`도 POST를 받도록 고칩니다. `REQUEST_METHOD`가 POST이면 stdin에서 `CONTENT_LENGTH`만큼 읽어 쿼리 문자열 대신 씁니다.
+- `adder`도 POST를 받도록 고칩니다. `REQUEST_METHOD`가 POST이면 stdin에서 `CONTENT_LENGTH`만큼 읽어 쿼리 문자열 대신 씁니다. 출력에서는 `Connection`, `Content-length`를 뺍니다 (서버가 정함).
 
 ### 오류 응답
 
-| 상황 | 응답 | 연결 |
-| --- | --- | --- |
-| 헤더 줄에 `:`가 없음, 헤더 줄이 `MAXLINE`보다 김 | `400` | 닫음 |
-| HTTP/1.1인데 `Host` 없음 | `400` | 닫음 |
-| `Content-Length`가 숫자가 아님, 음수, 서로 다른 값으로 여러 번 | `400` | 닫음 |
-| `Content-Length`와 `Transfer-Encoding`이 같이 옴 | `400` | 닫음 |
-| `Transfer-Encoding`만 옴 | `501` | 닫음 |
-| POST인데 `Content-Length` 없음 | `411 Length Required` | 닫음 |
-| `Content-Length > BODY_MAX` | `413 Payload Too Large` | 닫음 |
-| `Expect` 값이 `100-continue`가 아님 | `417 Expectation Failed` | 닫음 |
-| 본문 도중 연결 끊김 | 없음 (상대가 없음) | 닫음 |
+과제의 기본 오류 응답(404 / 403 / 500)은 Phase 1에서 이미 구현되어 있습니다. 404는 파일 없음, 403은 읽기·실행 권한 없음, 폴더 요청, `..` 경로이고, 500은 정적 파일 열기 실패입니다. CGI 실패 때의 500은 아직 못 보냅니다. 아래는 M5에서 **POST 본문 처리와 엣지 케이스** 때문에 새로 생기는 오류 응답입니다.
+
+| 상황 | 응답 | 연결 | 왜 (과제 항목) |
+| --- | --- | --- | --- |
+| 헤더 줄에 `:`가 없음, 헤더 줄이 `MAXLINE`보다 김 | `400` | 닫음 | 잘못된 HTTP 요청 (불완전한 헤더) |
+| HTTP/1.1인데 `Host` 없음 | `400` | 닫음 | 잘못된 HTTP 요청. RFC 7230이 HTTP/1.1 요청에 Host를 요구 |
+| `Content-Length`가 숫자가 아님, 음수, 서로 다른 값으로 여러 번 | `400` | 닫음 | 잘못된 HTTP 요청. 본문 길이를 믿을 수 없음 |
+| `Content-Length`와 `Transfer-Encoding`이 같이 옴 | `400` | 닫음 | 본문 끝이 애매해 request smuggling 위험 |
+| `Transfer-Encoding`만 옴 | `501` | 닫음 | chunked는 이번 범위에서 구현하지 않음 |
+| POST인데 `Content-Length` 없음 | `411 Length Required` | 닫음 | Content-Length 기반 본문 처리라 길이가 없으면 읽을 수 없음 |
+| `Content-Length > BODY_MAX` | `413 Payload Too Large` | 닫음 | 매우 큰 요청 본문. malloc 전에 거절 |
+| `Expect` 값이 `100-continue`가 아님 | `417 Expectation Failed` | 닫음 | Expect를 처리하기로 해서 생긴 경우 |
+| 본문 도중 연결 끊김 | 없음 (상대가 없음) | 닫음 | 클라이언트의 갑작스러운 연결 종료 |
+| CGI 실패 (exec 실패, 비정상 종료, 출력이 깨짐, 출력 상한 초과) | `500` | 유지 | 기본 오류 응답 500. 설계 선택 6 |
+| CGI가 10초 안에 출력을 끝내지 않음 | `504 Gateway Timeout` | 유지 | 응답 없는 동적 처리 |
+
+`411`, `417`, `501`은 `400`으로 합쳐도 동작에는 문제없지만, 원인을 정확히 알리려고 나눴습니다. 꼭 구분해야 하는 것은 `400`과 `413`입니다.
 
 ## 검증 계획
 
@@ -543,6 +658,29 @@ curl은 POST 본문이 일정 크기(보통 1KB)를 넘으면 `Expect: 100-conti
 | `printf 'POST / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n' \| nc localhost 8000` | `400` |
 | `curl -i -H "Expect: foo" -d x localhost:8000/cgi-bin/adder` | `417` |
 | `printf 'POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nab' \| nc -w1 localhost 8000` (본문 도중 끊김) | 서버가 죽지 않고, 이어서 보낸 `curl localhost:8000/` 이 `200` |
+
+**keep-alive** (`--keepalive-max 3`으로 띄운 경우 포함)
+
+| 요청 | 성공 조건 |
+| --- | --- |
+| `curl -v localhost:8000/home.html localhost:8000/home.html` | 두 번째 요청에 `Re-using existing connection` |
+| `curl -v -H "Connection: close" localhost:8000/home.html` | 응답에 `Connection: close`, 연결 닫힘 |
+| `curl -v --http1.0 localhost:8000/home.html` | 응답 후 연결 닫힘 |
+| `printf 'GET /home.html HTTP/1.1\r\nHost: x\r\n\r\nGET /home.html HTTP/1.1\r\nHost: x\r\n\r\n' \| nc localhost 8000` | 응답 두 개가 순서대로 옴 (파이프라이닝) |
+| `--keepalive-max 3`에서 같은 연결로 요청 4개 | 세 번째 응답에 `Connection: close`, 네 번째는 새 연결 |
+| `nc localhost 8000`에 요청 하나 보낸 뒤 대기 | 응답 후 약 5초 뒤 서버가 연결을 닫음 |
+| 잘못된 요청(예: `Content-Length: abc`) 뒤에 요청을 이어 보냄 | `400` 후 연결 닫힘, 뒤 요청은 처리되지 않음 |
+| `curl -v 'localhost:8000/cgi-bin/adder?1&2' 'localhost:8000/cgi-bin/adder?3&4'` | CGI 응답에도 `Content-Length`가 있고, 두 번째에 `Re-using existing connection` |
+| `ab -k -n 10000 -c 50` vs `ab -n 10000 -c 50` | keep-alive 쪽 처리량이 더 높음 (`docs/measurements/`에 기록) |
+
+**CGI 응답 구조:** 테스트용 CGI를 `cgi-bin/`에 둡니다. `fail`은 아무것도 출력하지 않고 1로 종료하고, `nohdr`는 빈 줄 없이 본문만 출력하며, `slow`는 `sleep 30`합니다.
+
+| 요청 | 성공 조건 |
+| --- | --- |
+| `curl -i localhost:8000/cgi-bin/fail` | `500` (지금은 200 + 빈 본문) |
+| `curl -i localhost:8000/cgi-bin/nohdr` | `500` |
+| `curl -i localhost:8000/cgi-bin/slow` | 약 10초 뒤 `504`, `ps`에 `slow`가 남지 않음 |
+| `curl -i -d "a=1&b=2" localhost:8000/cgi-bin/adder` | `200`, 응답 헤더에 서버가 센 `Content-Length` 하나만 있음 |
 
 위 요청들 뒤에 `curl localhost:8000/home.html`이 매번 `200`이면 서버가 살아 있는 것입니다. 기능 테스트는 `tests/functional/`에 같은 요청으로 추가합니다.
 
