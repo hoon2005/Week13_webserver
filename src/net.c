@@ -1,6 +1,7 @@
 #include "net.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +27,7 @@ enum accept_action {
 };
 
 static int listen_socket_open(const struct addrinfo *candidate);
+static int fd_cloexec_set(int fd);
 static void address_format(const struct sockaddr *addr, socklen_t addr_len,
                            char *text, size_t text_size);
 static const char *family_name(int family);
@@ -117,8 +119,9 @@ int net_accept(int listen_fd, struct sockaddr_storage *addr,
 }
 
 /*
- * 후보 주소 하나로 socket, setsockopt, bind, listen을 차례로 합니다.
- * 모두 성공하면 fd를, 하나라도 실패하면 연 소켓을 닫고 -1을 돌려줍니다.
+ * 후보 주소 하나로 socket, FD_CLOEXEC, setsockopt, bind, listen을 차례로
+ * 합니다. 모두 성공하면 fd를, 하나라도 실패하면 연 소켓을 닫고 -1을
+ * 돌려줍니다.
  */
 static int listen_socket_open(const struct addrinfo *candidate)
 {
@@ -137,8 +140,17 @@ static int listen_socket_open(const struct addrinfo *candidate)
         return -1;
     }
 
-    /* 서버를 끈 직후 같은 포트에 TIME_WAIT 연결이 남아 있어도 bind되게 합니다. */
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+    /*
+     * FD_CLOEXEC: CGI 자식이 execve하는 순간 이 소켓이 닫히게 합니다. 안 하면
+     * CGI 프로그램이 listen 소켓을 들고 실행돼서, 그동안 서버를 다시 켜면 bind가
+     * 실패합니다.
+     * SO_REUSEADDR: 서버를 끈 직후 같은 포트에 TIME_WAIT 연결이 남아 있어도
+     * bind되게 합니다.
+     */
+    if (fd_cloexec_set(fd) < 0) {
+        step = "fcntl(FD_CLOEXEC)";
+    } else if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval,
+                          sizeof(optval)) < 0) {
         step = "setsockopt(SO_REUSEADDR)";
     } else if (bind(fd, candidate->ai_addr, candidate->ai_addrlen) < 0) {
         step = "bind";
@@ -151,6 +163,16 @@ static int listen_socket_open(const struct addrinfo *candidate)
     fprintf(stderr, "net: %s(%s): %s\n", step, address, strerror(errno));
     close(fd);
     return -1;
+}
+
+static int fd_cloexec_set(int fd)
+{
+    int flags = fcntl(fd, F_GETFD);
+
+    if (flags < 0) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
 /* 주소를 숫자로만 바꿉니다. DNS 조회를 하지 않습니다. 실패하면 "?"입니다. */

@@ -3,7 +3,7 @@
 사용법: python3 static_test.py <build 폴더>
 
 임시 폴더에 tests/fixtures/www/ 내용과 테스트용 파일(빈 파일, 읽기 권한 없는
-파일, 하위 폴더 등)을 만들고 build/tiny를 빈 포트로 띄웁니다. 응답 없이 연결을
+파일, 하위 폴더 등)을 만들고 서버(build/<SERVER_NAME>)를 빈 포트로 띄웁니다. 응답 없이 연결을
 닫아야 하는 요청을 보낸 뒤에는 같은 서버에 정상 GET을 보내 서버가 살아 있는지
 확인합니다. 서버 실행과 대기에는 baseline_test.py의 도우미를 씁니다.
 """
@@ -31,13 +31,13 @@ BIG_FILE_SIZE = 32 * 1024 * 1024
 class StaticTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        tiny = os.path.join(base.BUILD_DIR, "tiny")
+        server = base.SERVER_PATH
         adder = os.path.join(base.BUILD_DIR, "adder")
-        for path in (tiny, adder):
+        for path in (server, adder):
             if not os.access(path, os.X_OK):
                 raise RuntimeError("실행 파일이 없습니다: %s (먼저 make)" % path)
 
-        cls.work_dir = tempfile.mkdtemp(prefix="tiny-static-")
+        cls.work_dir = tempfile.mkdtemp(prefix="server-static-")
         cls.www = os.path.join(cls.work_dir, "www")
         shutil.copytree(base.FIXTURE_DIR, cls.www)
         os.makedirs(os.path.join(cls.www, "cgi-bin"))
@@ -51,10 +51,10 @@ class StaticTest(unittest.TestCase):
         os.chmod(cls.secret, 0)
 
         cls.port = base.find_free_port()
-        cls.log_path = os.path.join(cls.work_dir, "tiny.log")
+        cls.log_path = os.path.join(cls.work_dir, "server.log")
         cls.log = open(cls.log_path, "w")
         cls.proc = subprocess.Popen(
-            [tiny, str(cls.port)],
+            [server, str(cls.port)],
             cwd=cls.www,
             stdin=subprocess.DEVNULL,
             stdout=cls.log,

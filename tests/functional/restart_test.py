@@ -2,7 +2,7 @@
 
 사용법: python3 restart_test.py <build 폴더>
 
-tiny는 응답을 보낸 뒤 연결을 먼저 닫습니다. 그래서 서버 쪽 포트에 TIME_WAIT
+서버는 응답을 보낸 뒤 연결을 먼저 닫습니다. 그래서 서버 쪽 포트에 TIME_WAIT
 연결이 남고, SO_REUSEADDR가 없으면 바로 다시 켤 때 bind가 실패합니다.
 서버 실행과 대기에는 baseline_test.py의 도우미를 씁니다.
 """
@@ -21,7 +21,7 @@ import baseline_test as base
 def start_server(port, www, log_path):
     log = open(log_path, "w")
     proc = subprocess.Popen(
-        [os.path.join(base.BUILD_DIR, "tiny"), str(port)],
+        [base.SERVER_PATH, str(port)],
         cwd=www,
         stdin=subprocess.DEVNULL,
         stdout=log,
@@ -60,10 +60,10 @@ def get_until_server_closes(port, path):
 
 class RestartTest(unittest.TestCase):
     def setUp(self):
-        tiny = os.path.join(base.BUILD_DIR, "tiny")
-        if not os.access(tiny, os.X_OK):
-            raise RuntimeError("실행 파일이 없습니다: %s (먼저 make)" % tiny)
-        self.work_dir = tempfile.mkdtemp(prefix="tiny-restart-")
+        server = base.SERVER_PATH
+        if not os.access(server, os.X_OK):
+            raise RuntimeError("실행 파일이 없습니다: %s (먼저 make)" % server)
+        self.work_dir = tempfile.mkdtemp(prefix="server-restart-")
         self.www = os.path.join(self.work_dir, "www")
         shutil.copytree(base.FIXTURE_DIR, self.www)
 
