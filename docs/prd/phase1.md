@@ -22,6 +22,44 @@ Tiny의 소켓 연결(M1), 정적 GET(M2), CGI GET(M3)을 우리 코드로 바�
 
 파일을 모듈로 나누는 일과 `tiny.c` 삭제는 이번 범위에 넣지 않습니다. 코드 리뷰로 채택할 코드를 정한 뒤 팀에서 결정합니다. `adder`에 `&`가 없을 때의 오류, 헤더 해석, keep-alive는 이후 마일스톤(M5, M7)으로 미룹니다.
 
+## Phase 1 교체 내용
+
+Tiny의 각 부분을 같은 동작의 우리 코드로 바꿨습니다. 모두 `src/main/tiny.c` 안에서 바꿨고, 정상 요청에 대한 응답 바이트는 원래 Tiny와 같습니다.
+
+### M1 소켓 연결
+
+| Tiny | 우리 코드 | 바꾼 내용 |
+| --- | --- | --- |
+| `Open_listenfd` (csapp.c) | `listen_socket_open` | getaddrinfo 후보 목록을 도는 대신 IPv4 주소(`sockaddr_in`)를 직접 채워 socket → SO_REUSEADDR → bind → listen이 그대로 보이게 함. setsockopt 실패도 확인. 실패하면 소켓을 닫고 -1 |
+| main의 `Accept`, `Close` | `accept`, `close` | 대문자 래퍼는 실패 시 exit. accept가 실패하면(예: ECONNABORTED) 원인만 출력하고 다음 연결을 기다림 |
+| `Getnameinfo` 접속 기록 | 뺌 | 응답 동작과 무관. 그래서 클라이언트 주소도 `sockaddr_storage` 대신 `sockaddr_in` 사용 |
+
+### M2 정적 GET
+
+| Tiny | 우리 코드 | 바꾼 내용 |
+| --- | --- | --- |
+| `doit` (모든 일을 직접 함) | `doit` + 단계 함수 | 요청 라인 읽기, 메서드 확인, 파일 찾기, 권한 확인을 `request_line_read`, `method_check`, `file_find`, `file_check_readable`, `file_check_executable`로 분리. doit은 순서대로 부르고 분기만 함 |
+| `read_requesthdrs` | `request_headers_skip` | 헤더를 빈 줄까지 읽고 버림 |
+| 없음 | `uri_check` (+ `uri_has_dot_dot`) | 경로 조각이 정확히 `..`이면 403. 웹 폴더 밖 파일 읽기, 다른 프로그램 실행을 막음 (M2 질문). `a..b.html`은 허용 |
+| `parse_uri` | `uri_parse` | 같은 규칙. strcpy, strcat 대신 snprintf로 버퍼 크기를 지킴 |
+| `serve_static` | `static_file_serve` | 헤더를 snprintf 한 번으로 만들어 한 번에 보냄 |
+| `get_filetype` | `file_type_get` + `FILE_TYPES` 표 | if 나열 대신 확장자·타입 표를 앞에서부터 확인. 순서와 규칙은 같음. M5에서 CSS, JS를 한 줄씩 추가하면 됨 |
+| `clienterror` | `http_error_send` | 헤더와 본문을 각각 snprintf 한 번으로 만듦. Tiny의 `sprintf(body, "%s...", body)`(자기 자신에 이어 붙이기) 제거, 긴 cause에도 버퍼를 넘지 않음 |
+
+### M3 CGI GET
+
+| Tiny | 우리 코드 | 바꾼 내용 |
+| --- | --- | --- |
+| `serve_dynamic`의 부모 쪽 | `cgi_serve` | 200과 Server 헤더를 한 번에 보내고, 자식을 만들고, 끝나면 회수 |
+| `serve_dynamic`의 자식 쪽 | `cgi_child_run` | QUERY_STRING 설정 → dup2로 표준 출력을 소켓으로 → execve로 adder 실행 |
+| `adder.c` | `adder.c` | strcpy 복사 없이 `&` 앞뒤를 바로 숫자로 바꾸고, 본문을 snprintf 한 번으로 만듦. 출력은 같음 |
+
+### 교체 확인
+
+- 원본 Tiny와 같은 요청 14개(home.html, /, gif, jpg, adder 두 개, 404, POST 501, 소문자 get, 폴더 403, 읽기 권한 없는 파일 403, 실행 권한 없는 CGI 403, 없는 CGI 404, ?v=2)를 보냈을 때 응답이 바이트 단위로 모두 같음
+- 의도한 차이는 `../` 요청 하나(원본 404 → 403)
+- 아래 안정성 수정 5가지는 이 교체 뒤에 추가로 반영한 것이며, 오류 경로의 동작만 바뀜
+
 ## 설계 선택
 
 ### 1. 실패를 어디서 멈출까?
