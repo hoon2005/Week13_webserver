@@ -1004,10 +1004,10 @@ int open_listenfd(char *port)
 
     /* Get a list of potential server addresses */
     memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_socktype = SOCK_STREAM;             /* Accept connections */
-    hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG; /* ... on any IP address */
-    hints.ai_flags |= AI_NUMERICSERV;            /* ... using port number */
-    if ((rc = getaddrinfo(NULL, port, &hints, &listp)) != 0) {
+    hints.ai_socktype = SOCK_STREAM;             /* Accept connections (TCP)*/
+    hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG; /* ... on any IP address 서버용주소 이 컴퓨터가 쓰는 IP종류*/
+    hints.ai_flags |= AI_NUMERICSERV;            /* ... using port number (port8000)같은 숫자 문자열*/
+    if ((rc = getaddrinfo(NULL, port, &hints, &listp)) != 0) { // 실패해도 errno쓰지않고 반환값 에러코드
         fprintf(stderr, "getaddrinfo failed (port %s): %s\n", port, gai_strerror(rc));
         return -2;
     }
@@ -1018,14 +1018,14 @@ int open_listenfd(char *port)
         if ((listenfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0) 
             continue;  /* Socket failed, try the next */
 
-        /* Eliminates "Address already in use" error from bind */
+        /* Eliminates "Address already in use" error from bind 타임아웃 bind 실패 방지 */
         setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR,    //line:netp:csapp:setsockopt
                    (const void *)&optval , sizeof(int));
 
         /* Bind the descriptor to the address */
         if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0)
             break; /* Success */
-        if (close(listenfd) < 0) { /* Bind failed, try the next */
+        if (close(listenfd) < 0) { /* Bind failed, try the next  실패하면 소켓닫고 다음 후보*/
             fprintf(stderr, "open_listenfd close failed: %s\n", strerror(errno));
             return -1;
         }
@@ -1034,11 +1034,11 @@ int open_listenfd(char *port)
 
     /* Clean up */
     freeaddrinfo(listp);
-    if (!p) /* No address worked */
+    if (!p) /* No address worked 성공후보가 없음 소켓과 bind가 끝나서 주소목록 필요 x listen전에 바로 해제*/
         return -1;
 
-    /* Make it a listening socket ready to accept connection requests */
-    if (listen(listenfd, LISTENQ) < 0) {
+    /* Make it a listening socket ready to accept connection requests 블로킹*/
+    if (listen(listenfd, LISTENQ) < 0) { // 성공하면 완성된 listenfd를 반환 . 실패시 닫고 -1반환
         close(listenfd);
 	return -1;
     }
@@ -1049,7 +1049,7 @@ int open_listenfd(char *port)
 /****************************************************
  * Wrappers for reentrant protocol-independent helpers
  ****************************************************/
-int Open_clientfd(char *hostname, char *port) 
+int Open_clientfd(char *hostname, char *port) // 서버 돌아가는 중에 실패하면 종료함
 {
     int rc;
 

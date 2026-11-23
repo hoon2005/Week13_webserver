@@ -7,6 +7,7 @@
  *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
  */
 #include "csapp.h"
+#include "net.h"
 #include <strings.h>
 
 void doit(int fd);
@@ -20,25 +21,33 @@ void clienterror(int fd, char *cause, char *errnum,
 
 int main(int argc, char **argv) 
 {
-    int listenfd, connfd;
+    int listenfd, connfd; // 두 소켓
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
-    struct sockaddr_storage clientaddr;
+    struct sockaddr_storage clientaddr; // 클라이언트 주소 담을 공간
 
     /* Check command line args */
-    if (argc != 2) {
+    if (argc != 2) { //포트 8000처럼 인자 받음
 	fprintf(stderr, "usage: %s <port>\n", argv[0]);
-	exit(1);
+	exit(1); //socket->bind->listen 한번에
     }
 
-    listenfd = Open_listenfd(argv[1]);
-    while (1) {
+    /* Open_listenfd 대신 우리 코드로 엽니다. 포트를 못 열면 종료합니다 */
+    listenfd = net_listen(argv[1]);
+    if (listenfd < 0) {
+	fprintf(stderr, "port %s에서 listen 소켓을 열지 못했습니다\n", argv[1]);
+	exit(1);
+    }
+    while (1) { //큐에서꺼냄_블로킹
 	clientlen = sizeof(clientaddr);
-	connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:tiny:accept
+	connfd = net_accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:tiny:accept 큐에서꺼냄_블로킹
+	if (connfd < 0) {
+	    continue; /* 이 연결만 포기하고 다음 손님을 기다립니다 */
+	}
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
-                    port, MAXLINE, 0);
+                    port, MAXLINE, 0); //클라이언트 주소를 사람이 읽는 문자열 바꿈
         printf("Accepted connection from (%s, %s)\n", hostname, port);
-	doit(connfd);                                             //line:netp:tiny:doit
+	doit(connfd);       // HTTP 요청읽고 응답                                      //line:netp:tiny:doit
 	Close(connfd);                                            //line:netp:tiny:close
     }
 }
