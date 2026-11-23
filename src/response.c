@@ -57,7 +57,8 @@ int response_send_error(int fd, int status, const char *reason,
 int response_send_static(int fd, const char *path)
 {
     struct stat st;
-    int file_fd = open(path, O_RDONLY);
+    /* FIFO를 열 때 상대 프로세스를 기다리지 않습니다. */
+    int file_fd = open(path, O_RDONLY | O_NONBLOCK);
     int rc;
 
     if (file_fd < 0) {

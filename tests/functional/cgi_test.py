@@ -13,15 +13,14 @@ import shutil
 import socket
 import sys
 import tempfile
-import time
 import unittest
+from pathlib import Path
 
 import baseline_test as base
 import restart_test
 import static_test
 
-# CGI 실행 중에 서버를 다시 켜는 테스트에서 CGI가 살아 있는 시간입니다.
-SLOW_CGI_SEC = 2
+CGI_RELEASE_FILE = "release-cgi"
 
 ECHO_SCRIPT = """#!/bin/sh
 printf 'Content-Type: text/plain\\r\\n\\r\\n'
@@ -33,10 +32,20 @@ printf 'Content-Type: text/plain\\r\\n\\r\\n'
 kill -SEGV $$
 """
 
-SLOW_SCRIPT = """#!/bin/sh
-printf 'Content-Type: text/plain\\r\\n\\r\\nslow\\n'
-exec sleep %d
-""" % SLOW_CGI_SEC
+# 테스트가 파일을 만들 때까지 기다립니다. 테스트가 중단돼도 30초 뒤에는 끝납니다.
+WAIT_SCRIPT = f"""#!/bin/sh
+printf 'Content-Type: text/plain\\r\\n\\r\\nready\\n'
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+    if [ -f {CGI_RELEASE_FILE} ]; then
+        printf 'released\\n'
+        exit 0
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+done
+exit 1
+"""
 
 
 class CgiTest(unittest.TestCase):
@@ -55,7 +64,7 @@ class CgiTest(unittest.TestCase):
         shutil.copy2(adder, os.path.join(cgi_dir, "adder"))
         cls.write_script("echo", ECHO_SCRIPT, 0o755)
         cls.write_script("crash", CRASH_SCRIPT, 0o755)
-        cls.write_script("slow", SLOW_SCRIPT, 0o755)
+        cls.write_script("wait", WAIT_SCRIPT, 0o755)
         cls.write_script("noexec", ECHO_SCRIPT, 0o644)
 
         cls.port = base.find_free_port()
@@ -152,27 +161,30 @@ class CgiTest(unittest.TestCase):
         # CGI가 listen 소켓을 물려받으면(FD_CLOEXEC가 없으면) CGI가 끝날 때까지
         # 그 포트에 다른 소켓을 bind할 수 없습니다.
         port = base.find_free_port()
-        proc, log = self.start(port, "slow-first.log")
-        try:
-            with socket.create_connection(
-                (base.HOST, port), timeout=base.REQUEST_TIMEOUT_SEC
-            ) as sock:
-                sock.sendall(b"GET /cgi-bin/slow HTTP/1.0\r\n\r\n")
-                # 상태 줄(서버)과 스크립트 출력(CGI)은 따로 도착할 수 있습니다.
-                received = b""
-                while b"slow" not in received:
-                    chunk = sock.recv(4096)
-                    self.assertTrue(chunk, "CGI 출력 전에 연결이 닫혔습니다")
-                    received += chunk
-                restart_test.stop_server(proc, log)
+        release = Path(self.www, CGI_RELEASE_FILE)
+        proc, log = self.start(port, "cgi-first.log")
+        self.addCleanup(restart_test.stop_server, proc, log)
+        self.addCleanup(release.touch)
 
-                started = time.monotonic()
-                proc, log = self.start(port, "slow-second.log")
-                self.assertLess(time.monotonic() - started, SLOW_CGI_SEC)
+        with socket.create_connection(
+            (base.HOST, port), timeout=base.REQUEST_TIMEOUT_SEC
+        ) as sock:
+            sock.sendall(b"GET /cgi-bin/wait HTTP/1.0\r\n\r\n")
+            with sock.makefile("rb") as response:
+                self.assertEqual(response.readline(), b"HTTP/1.0 200 OK\r\n")
+                self.assertEqual(response.readline(), b"Content-Type: text/plain\r\n")
+                self.assertEqual(response.readline(), b"\r\n")
+                self.assertEqual(response.readline(), b"ready\n")
+
+                restart_test.stop_server(proc, log)
+                new_proc, new_log = self.start(port, "cgi-second.log")
+                self.addCleanup(restart_test.stop_server, new_proc, new_log)
                 status, _, _ = self.get("/home.html", port=port)
                 self.assertEqual(status, 200)
-        finally:
-            restart_test.stop_server(proc, log)
+
+                # 새 서버가 응답한 뒤에도 기존 CGI가 살아 있는지 확인합니다.
+                release.touch()
+                self.assertEqual(response.readline(), b"released\n")
 
 
 if __name__ == "__main__":

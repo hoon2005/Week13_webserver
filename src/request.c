@@ -71,7 +71,6 @@ int request_skip_headers(struct io_reader *reader)
  * URI를 실제로 열 경로로 바꿉니다. 쿼리('?' 뒤)는 떼고 경로만 봅니다.
  * 경로 규칙: '/'로 시작해야 합니다. 중간에 빈 구간("//")이 있거나 구간 전체가
  * "." 또는 ".."이면 거부합니다. 끝의 '/'는 허용하고 기본 파일 이름을 붙입니다.
- * 정규화하지 않으므로 여기서 본 경로와 실제로 여는 경로가 같습니다.
  * 첫 구간이 정확히 "cgi-bin"이면 CGI이고, 대소문자만 다르면 거부합니다.
  */
 enum request_target_kind request_map_uri(const char *uri,

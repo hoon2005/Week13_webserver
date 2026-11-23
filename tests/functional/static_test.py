@@ -172,6 +172,12 @@ class StaticTest(unittest.TestCase):
         status, _, _ = self.get("/sub")
         self.assertEqual(status, 403)
 
+    def test_FIFO는_대기하지_않고_403을_준다(self):
+        os.mkfifo(os.path.join(self.www, "named-pipe"))
+        status, _, _ = self.get("/named-pipe")
+        self.assertEqual(status, 403)
+        self.assert_server_alive()
+
     @unittest.skipIf(
         hasattr(os, "geteuid") and os.geteuid() == 0,
         "root는 권한 없는 파일도 읽을 수 있습니다",
@@ -185,17 +191,16 @@ class StaticTest(unittest.TestCase):
             (base.HOST, self.port), timeout=base.REQUEST_TIMEOUT_SEC
         ) as sock:
             sock.sendall(b"GET /big.txt HTTP/1.0\r\n\r\n")
-            self.assertTrue(sock.recv(4096).startswith(b"HTTP/1.0 200"))
-            # 닫을 때 FIN 대신 RST를 보내게 해서, 서버의 다음 write가 바로 실패하게 합니다.
+            with sock.makefile("rb") as response:
+                self.assertEqual(response.readline(), b"HTTP/1.0 200 OK\r\n")
+            # 본문을 받는 도중 연결을 강제로 끊습니다.
             sock.setsockopt(
                 socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
             )
         self.assert_server_alive()
 
     def test_요청만_보내고_바로_닫은_손님에게_쓰다가_SIGPIPE가_나도_서버는_살아_있다(self):
-        # 손님이 먼저 FIN을 보내면 서버 소켓은 CLOSE_WAIT이 됩니다. 서버의 첫 write에
-        # 손님 커널이 RST로 답하고, 그 뒤의 write는 EPIPE와 함께 SIGPIPE를 받습니다.
-        # SIGPIPE를 무시하지 않으면 여기서 서버가 죽습니다.
+        # 응답을 읽기 전에 연결을 닫고, 서버가 이어지는 요청을 처리하는지 확인합니다.
         with socket.create_connection(
             (base.HOST, self.port), timeout=base.REQUEST_TIMEOUT_SEC
         ) as sock:
