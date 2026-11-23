@@ -1,36 +1,53 @@
+/*
+ * tiny.c - 정적 파일과 CGI(GET)를 처리하는 작은 웹 서버입니다.
+ *   CS:APP 11.6절 Tiny와 같은 일을 합니다. Phase 1 계획(M1~M3)에 따라
+ *   Tiny의 각 부분을 같은 동작의 우리 코드로 바꿔 끼웠습니다.
+ *     M1 소켓 연결: listen_socket_open, main의 accept 반복문
+ *     M2 정적 GET:  doit과 단계 함수들, static_file_serve, http_error_send
+ *     M3 CGI GET:   cgi_serve, cgi_child_run
+ *   리뷰에서 나온 안정성 수정 5가지도 반영했습니다. 클라이언트 한 명의 문제
+ *   (연결 중단, 깨진 요청, 빈 파일, fork 실패)로 서버 전체가 꺼지지 않고
+ *   그 요청만 끝냅니다.
+ *   사용법: ./build/tiny <port>
+ */
 #include "csapp.h"
-#include <strings.h> 
+#include <strings.h> /* strcasecmp (메서드 대소문자 무시 비교) */
 
 /* M1 */
-static int listen_socket_open(const char *port); 
+static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 open_listenfd 대신 */
 
 /* M2: 요청 처리 */
 void doit(int fd);
-static int request_line_read(rio_t *rp, char *method, char *uri, char *version);             
-static int method_check(int fd, const char *method);     
-static void request_headers_skip(rio_t *rp);              
-static int uri_check(int fd, const char *uri);            
-static int uri_has_dot_dot(const char *path, size_t len); 
-static int uri_parse(char *uri, char *filename, char *cgiargs); 
-static int file_find(int fd, const char *filename, struct stat *sbuf); 
-static int file_check_readable(int fd, const char *filename, const struct stat *sbuf);  
-static int file_check_executable(int fd, const char *filename, const struct stat *sbuf); 
+static int request_line_read(int fd, rio_t *rp, char *method, char *uri,
+                             char *version);              /* doit에서 분리 */
+static int method_check(int fd, const char *method);      /* doit에서 분리 */
+static int request_headers_skip(rio_t *rp);               /* read_requesthdrs 대신 */
+static int uri_check(int fd, const char *uri);            /* 새로 만듦: ../ 차단 */
+static int uri_has_dot_dot(const char *path, size_t len); /* uri_check가 쓰는 도우미 */
+static int uri_parse(char *uri, char *filename, char *cgiargs); /* parse_uri 대신 */
+static int file_find(int fd, const char *filename, struct stat *sbuf); /* doit에서 분리 */
+static int file_check_readable(int fd, const char *filename,
+                               const struct stat *sbuf);  /* doit에서 분리 */
+static int file_check_executable(int fd, const char *filename,
+                                 const struct stat *sbuf); /* doit에서 분리 */
 
 /* M2: 정적 응답, 오류 응답 */
-static void static_file_serve(int fd, const char *filename, int filesize); 
-static const char *file_type_get(const char *filename); 
-static void http_error_send(int fd, const char *cause, const char *errnum, const char *shortmsg, const char *longmsg); 
+static void static_file_serve(int fd, const char *filename, int filesize); /* serve_static 대신 */
+static const char *file_type_get(const char *filename); /* get_filetype 대신 */
+static void http_error_send(int fd, const char *cause, const char *errnum,
+                            const char *shortmsg, const char *longmsg); /* clienterror 대신 */
 
 /* M3: CGI */
-static void cgi_serve(int fd, const char *filename, const char *cgiargs);     
-static void cgi_child_run(int fd, const char *filename, const char *cgiargs); 
+static void cgi_serve(int fd, const char *filename, const char *cgiargs);     /* serve_dynamic 대신 (부모 쪽) */
+static void cgi_child_run(int fd, const char *filename, const char *cgiargs); /* serve_dynamic의 자식 부분 분리 */
 
 
 /* ============================== M1 소켓 연결 ============================== */
 
 /*
- * 1) 실행 인자로 받은 포트에 리스닝 소켓을 연다 (listen_socket_open)
- * 2) 무한 반복: accept로 연결 하나를 꺼내 connfd를 받고
+ * 1) SIGPIPE를 무시하도록 설정한다
+ * 2) 실행 인자로 받은 포트에 리스닝 소켓을 연다 (listen_socket_open)
+ * 3) 무한 반복: accept로 연결 하나를 꺼내 connfd를 받고
  *    → doit(connfd)로 요청 하나를 처리하고 → close
  */
 int main(int argc, char **argv)
@@ -44,6 +61,14 @@ int main(int argc, char **argv)
 
     if (argc != 2) {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+
+    /* [안정성 수정] 이미 끊긴 클라이언트에게 쓰면 커널이 SIGPIPE를 보내고,
+     * 기본 동작은 서버 종료임. 무시하도록 바꾸면 쓰기가 -1(EPIPE)로 실패할 뿐이라
+     * 그 연결만 정리하고 서버는 계속 동작함 */
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
         exit(1);
     }
 
@@ -143,8 +168,9 @@ void doit(int fd)
     int is_static;
 
     /* 1. 요청 읽기: 연결에 읽기 버퍼를 붙이고 첫 줄을 나눈다 */
-    Rio_readinitb(&rio, fd);
-    if (request_line_read(&rio, method, uri, version) < 0) { /* 직접 읽던 코드 → 함수로 분리 */
+    rio_readinitb(&rio, fd);
+    /* [안정성 수정] 첫 줄이 불완전하거나 세 칸이 아니면 400을 보내고 끝냄 */
+    if (request_line_read(fd, &rio, method, uri, version) < 0) {
         return;
     }
 
@@ -154,7 +180,11 @@ void doit(int fd)
     }
 
     /* 3. 헤더 건너뛰기: 빈 줄까지 읽고 버린다 */
-    request_headers_skip(&rio); /* read_requesthdrs 대신 */
+    /* [안정성 수정] 빈 줄 전에 연결이 끊기거나 읽기가 실패하면 여기서 끝냄
+     * (Tiny는 이때 무한 반복했음) */
+    if (request_headers_skip(&rio) < 0) {
+        return;
+    }
 
     /* 4. URI 확인: 폴더 밖으로 나가는 ..이 있으면 403 (새로 추가된 단계) */
     if (uri_check(fd, uri) < 0) {
@@ -163,6 +193,13 @@ void doit(int fd)
 
     /* 5. URI 해석: 정적/동적 판단, 파일 경로와 CGI 인자 만들기 */
     is_static = uri_parse(uri, filename, cgiargs); /* parse_uri 대신 */
+    /* [안정성 수정] 경로가 버퍼보다 길어 잘렸으면, 잘린 경로로 엉뚱한 파일을
+     * 찾지 않도록 파일 조회 전에 414를 보내고 끝냄 */
+    if (is_static < 0) {
+        http_error_send(fd, uri, "414", "URI Too Long",
+                        "Tiny couldn't handle such a long path");
+        return;
+    }
 
     /* 6. 파일 찾기: 없으면 404 */
     if (file_find(fd, filename, &sbuf) < 0) { /* doit 안의 stat 검사 → 함수로 분리 */
@@ -186,23 +223,44 @@ void doit(int fd)
 /*
  * 요청 라인(첫 줄)을 읽어 메서드, URI, 버전으로 나눕니다.
  *   예: "GET /home.html HTTP/1.1" → "GET", "/home.html", "HTTP/1.1"
- * doit 안에 있던 코드를 그대로 뺐습니다.
+ * 읽은 줄은 확인용으로 터미널에 출력합니다.
+ *
+ * [안정성 수정] Tiny는 줄이 끝까지 왔는지, 세 칸이 다 채워졌는지 확인하지 않아
+ * "GET"만 오면 비어 있는(쓰레기) uri, version 값으로 다음 단계를 진행했습니다.
+ *   - 읽기 실패나 바로 끊김: 응답할 상대가 없으므로 -1
+ *   - 줄바꿈이 없음(중간에 끊김, 또는 MAXLINE보다 김): 400 후 -1
+ *   - 세 칸이 아님: 400 후 -1
  */
-static int request_line_read(rio_t *rp, char *method, char *uri, char *version)
+static int request_line_read(int fd, rio_t *rp, char *method, char *uri,
+                             char *version)
 {
     char buf[MAXLINE];
+    ssize_t n;
 
-    if (!Rio_readlineb(rp, buf, MAXLINE)) { /* 아무것도 못 읽음 = 클라이언트가 바로 끊음 */
-        return -1;                          /* doit이 여기서 끝나도록 -1 */
+    /* Rio_readlineb(대문자) 대신 rio_readlineb: 대문자는 읽기 오류 시 exit함 */
+    n = rio_readlineb(rp, buf, MAXLINE);
+    if (n <= 0) { /* 0: 아무것도 못 읽고 끊김, -1: 읽기 오류 */
+        return -1;
     }
-    printf("%s", buf);                             /* 확인용으로 요청 라인 출력 */
-    sscanf(buf, "%s %s %s", method, uri, version); /* 공백 기준으로 세 칸으로 나눔 */
+    printf("%s", buf); /* 확인용으로 요청 라인 출력 */
+
+    if (buf[n - 1] != '\n') { /* 줄바꿈까지 오지 않은 불완전한 줄 */
+        http_error_send(fd, "request line", "400", "Bad Request",
+                        "Tiny couldn't read a complete request line");
+        return -1;
+    }
+    /* 공백 기준으로 세 칸으로 나누고, 세 칸이 다 채워졌는지 확인 */
+    if (sscanf(buf, "%s %s %s", method, uri, version) != 3) {
+        http_error_send(fd, "request line", "400", "Bad Request",
+                        "Tiny needs a method, a URI and a version");
+        return -1;
+    }
     return 0;
 }
 
 /*
  * Tiny가 처리할 수 있는 메서드(GET)인지 확인합니다.
- * doit 안에 있던 코드를 그대로 뺐습니다.
+ * doit 안에 있던 코드를 그대로 뺐습니다. 동작 변화 없음.
  */
 static int method_check(int fd, const char *method)
 {
@@ -218,16 +276,25 @@ static int method_check(int fd, const char *method)
  * 헤더를 빈 줄(\r\n)까지 한 줄씩 읽어 출력하고 버립니다.
  * 내용을 쓰지는 않지만, 읽어서 비워야 요청이 어디서 끝나는지 맞춰집니다.
  * Tiny의 read_requesthdrs를 대신합니다.
+ *
+ * [안정성 수정] Tiny는 읽기 결과를 확인하지 않아, 빈 줄 전에 연결이 끊기면
+ * buf가 그대로 남아 같은 줄을 끝없이 비교했습니다(무한 반복).
+ * 빈 줄을 만났을 때만 0, 끊김이나 읽기 오류면 -1을 돌려줍니다.
  */
-static void request_headers_skip(rio_t *rp)
+static int request_headers_skip(rio_t *rp)
 {
     char buf[MAXLINE];
+    ssize_t n;
 
-    Rio_readlineb(rp, buf, MAXLINE); /* 첫 헤더 줄 읽기 */
-    printf("%s", buf);
-    while (strcmp(buf, "\r\n")) {    /* 빈 줄(헤더 끝)이 나올 때까지 */
-        Rio_readlineb(rp, buf, MAXLINE); /* 한 줄씩 읽고 */
-        printf("%s", buf);               /* 출력만 하고 버림 */
+    while (1) {
+        n = rio_readlineb(rp, buf, MAXLINE); /* 한 줄 읽기 (Rio_readlineb 대신) */
+        if (n <= 0) {                        /* 빈 줄 전에 끊김(0) 또는 오류(-1) */
+            return -1;                       /* 응답할 상대가 없으므로 그냥 끝냄 */
+        }
+        printf("%s", buf);                   /* 출력만 하고 버림 (Tiny와 같음) */
+        if (strcmp(buf, "\r\n") == 0) {      /* 빈 줄 = 헤더 끝 */
+            return 0;                        /* 이때만 다음 단계로 */
+        }
     }
 }
 
@@ -276,34 +343,49 @@ static int uri_has_dot_dot(const char *path, size_t len)
  * URI를 정적/동적으로 나누고 파일 경로와 CGI 인자를 만듭니다.
  * 정적이면 1, 동적이면 0. Tiny의 parse_uri와 같은 규칙입니다.
  * strcpy, strcat 대신 snprintf로 버퍼 크기(MAXLINE)를 지켜 복사합니다.
+ *
+ * [안정성 수정] snprintf는 버퍼를 넘지 않는 대신 뒤를 잘라 버립니다.
+ * 반환값(만들려던 전체 길이)이 MAXLINE 이상이면 잘린 것이므로 -1을 돌려줍니다.
+ * 반환값을 확인하지 않으면 -O2 빌드(make release)에서 "잘릴 수 있음" 경고가
+ * -Werror 때문에 오류가 되어 빌드가 실패했습니다.
  */
 static int uri_parse(char *uri, char *filename, char *cgiargs)
 {
     char *ptr;
+    int n; /* snprintf가 만들려던 전체 길이 */
 
     if (!strstr(uri, "cgi-bin")) { /* cgi-bin이 없으면 정적 */
         cgiargs[0] = '\0';         /* strcpy(cgiargs, "") 대신: CGI 인자 없음 */
         /* strcpy + strcat 세 번 대신 snprintf 한 번:
          * "." + URI, '/'로 끝나면 home.html을 붙임 */
-        snprintf(filename, MAXLINE, ".%s%s", uri,
-                 uri[strlen(uri) - 1] == '/' ? "home.html" : "");
+        n = snprintf(filename, MAXLINE, ".%s%s", uri,
+                     uri[strlen(uri) - 1] == '/' ? "home.html" : "");
+        if (n < 0 || n >= MAXLINE) { /* [안정성 수정] 경로가 잘렸으면 */
+            return -1;
+        }
         return 1;
     }
 
     ptr = strchr(uri, '?'); /* 동적: 쿼리 문자열 시작 위치 */
     if (ptr) {
-        snprintf(cgiargs, MAXLINE, "%s", ptr + 1); /* strcpy 대신: '?' 뒤를 CGI 인자로 */
-        *ptr = '\0';                               /* URI를 '?' 앞에서 자름 */
+        n = snprintf(cgiargs, MAXLINE, "%s", ptr + 1); /* strcpy 대신: '?' 뒤를 CGI 인자로 */
+        if (n < 0 || n >= MAXLINE) {                   /* [안정성 수정] 잘렸으면 */
+            return -1;
+        }
+        *ptr = '\0'; /* URI를 '?' 앞에서 자름 */
     } else {
         cgiargs[0] = '\0'; /* strcpy(cgiargs, "") 대신 */
     }
-    snprintf(filename, MAXLINE, ".%s", uri); /* strcpy + strcat 대신: "." + '?' 앞부분 */
+    n = snprintf(filename, MAXLINE, ".%s", uri); /* strcpy + strcat 대신: "." + '?' 앞부분 */
+    if (n < 0 || n >= MAXLINE) {                 /* [안정성 수정] 잘렸으면 */
+        return -1;
+    }
     return 0;
 }
 
 /*
  * stat으로 파일이 있는지 확인하고 파일 정보(종류, 권한, 크기)를 sbuf에
- * 채웁니다. doit 안에 있던 코드를 그대로 뺐습니다.
+ * 채웁니다. doit 안에 있던 코드를 그대로 뺐습니다. 동작 변화 없음.
  */
 static int file_find(int fd, const char *filename, struct stat *sbuf)
 {
@@ -317,7 +399,7 @@ static int file_find(int fd, const char *filename, struct stat *sbuf)
 
 /*
  * 정적 파일을 보내도 되는지 확인합니다.
- * doit 안에 있던 코드를 그대로 뺐습니다.
+ * doit 안에 있던 코드를 그대로 뺐습니다. 동작 변화 없음.
  */
 static int file_check_readable(int fd, const char *filename,
                                const struct stat *sbuf)
@@ -333,7 +415,7 @@ static int file_check_readable(int fd, const char *filename,
 
 /*
  * CGI 프로그램을 실행해도 되는지 확인합니다.
- * doit 안에 있던 코드를 그대로 뺐습니다. 
+ * doit 안에 있던 코드를 그대로 뺐습니다. 동작 변화 없음.
  */
 static int file_check_executable(int fd, const char *filename,
                                  const struct stat *sbuf)
@@ -365,32 +447,62 @@ static const struct file_type FILE_TYPES[] = {
 
 /*
  * 정적 파일을 200 응답으로 보냅니다. Tiny의 serve_static을 대신합니다.
- * 1) 상태 줄과 헤더를 버퍼 하나에 만들어 보낸다
- * 2) 파일을 메모리에 올려(mmap) 본문으로 보낸다 (Tiny와 같음)
+ *
+ * [안정성 수정] 순서를 바꿨습니다.
+ *   Tiny: 200 헤더 전송 → 파일 열기 → mmap → 본문 전송
+ *   지금: 파일 열기 → mmap → (준비가 끝나면) 200 헤더 전송 → 본문 전송
+ *   - 파일 준비가 실패하면 아직 아무것도 안 보냈으므로 500을 보낼 수 있음
+ *   - 크기 0인 파일은 mmap이 실패(EINVAL)해서 Tiny에서는 Mmap이 서버를
+ *     종료시켰음. 크기 0이면 mmap 없이 Content-length: 0으로 헤더만 보냄
+ *   - Open/Mmap/Close/Rio_writen(대문자)은 실패하면 exit하므로 소문자로 바꾸고
+ *     실패하면 이 요청만 끝냄
  */
 static void static_file_serve(int fd, const char *filename, int filesize)
 {
     char header[MAXBUF];
     int header_len; /* snprintf가 만든 헤더 길이 (strlen 대신 사용) */
     int srcfd;
-    char *srcp;
+    char *srcp = NULL; /* 크기 0인 파일이면 mmap하지 않으므로 NULL로 둠 */
 
-    /* Tiny는 sprintf로 한 줄씩 이어 붙였음 → snprintf 한 번으로 헤더 전체를 만듦.
-     * 보내는 바이트는 같고, 버퍼 크기를 넘지 않음 */
+    /* 1. 파일 준비: 열기 (Open 대신 open) */
+    srcfd = open(filename, O_RDONLY, 0);
+    if (srcfd < 0) { /* 열기 실패: 아직 아무것도 안 보냈으므로 500 */
+        http_error_send(fd, filename, "500", "Internal Server Error",
+                        "Tiny couldn't open the file");
+        return;
+    }
+    /* 2. 파일 준비: 메모리에 올리기. 크기 0이면 올릴 내용이 없으므로 건너뜀 */
+    if (filesize > 0) {
+        srcp = mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); /* Mmap 대신 mmap */
+        if (srcp == MAP_FAILED) {                                    /* 실패하면 */
+            close(srcfd);                                            /* 열어 둔 파일을 닫고 */
+            http_error_send(fd, filename, "500", "Internal Server Error",
+                            "Tiny couldn't map the file");           /* 500 */
+            return;
+        }
+    }
+    close(srcfd); /* mmap 뒤에는 fd가 필요 없음 (Close 대신 close) */
+
+    /* 3. 준비가 끝났으므로 200 헤더 전송.
+     * Tiny는 sprintf로 한 줄씩 이어 붙였음 → snprintf 한 번으로 헤더 전체를 만듦.
+     * 크기 0이면 Content-length: 0 */
     header_len = snprintf(header, sizeof(header),
                           "HTTP/1.0 200 OK\r\n"
                           "Server: Tiny Web Server\r\n"
                           "Content-length: %d\r\n"
                           "Content-type: %s\r\n\r\n",
                           filesize, file_type_get(filename)); /* get_filetype 대신 */
-    Rio_writen(fd, header, header_len); /* 헤더를 한 번에 보냄 */
 
-    /* 본문 보내기: Tiny와 같음 */
-    srcfd = Open(filename, O_RDONLY, 0);
-    srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
-    Close(srcfd);
-    Rio_writen(fd, srcp, filesize);
-    Munmap(srcp, filesize);
+    /* 4. 헤더를 다 보냈을 때만 본문 전송 (Rio_writen 대신 rio_writen).
+     * 쓰기가 실패하면(클라이언트가 끊음) 더 보내지 않고 정리만 함 */
+    if (rio_writen(fd, header, header_len) == header_len && filesize > 0) {
+        rio_writen(fd, srcp, filesize); /* 실패해도 이 요청만 끝남 */
+    }
+
+    /* 5. 정리: mmap했던 경우에만 해제 (Munmap 대신 munmap) */
+    if (srcp != NULL) {
+        munmap(srcp, filesize);
+    }
 }
 
 /*
@@ -441,8 +553,12 @@ static void http_error_send(int fd, const char *cause, const char *errnum,
         body_len = sizeof(body) - 1;
     }
 
-    Rio_writen(fd, header, header_len); /* 헤더 보내기 */
-    Rio_writen(fd, body, body_len);     /* 본문 보내기 */
+    /* [안정성 수정] Rio_writen(대문자)은 쓰기 실패 시 exit함 → rio_writen.
+     * 헤더 쓰기가 실패하면(클라이언트가 끊음) 본문은 보내지 않음 */
+    if (rio_writen(fd, header, header_len) != header_len) {
+        return;
+    }
+    rio_writen(fd, body, body_len); /* 실패해도 이 요청만 끝남 */
 }
 
 /* ============================== M3 CGI GET ============================== */
@@ -453,29 +569,49 @@ static void http_error_send(int fd, const char *cause, const char *errnum,
  * 1) 상태 줄과 Server 헤더를 먼저 보낸다. 나머지 헤더와 본문은 CGI
  *    프로그램이 직접 출력한다
  * 2) fork로 자식을 만들어 자식이 프로그램을 실행한다
- * 3) 부모는 자식이 끝날 때까지 기다렸다가 회수한다(Wait). 회수하지 않으면
+ * 3) 부모는 자식이 끝날 때까지 기다렸다가 회수한다. 회수하지 않으면
  *    끝난 자식이 좀비 프로세스로 남는다
+ *
+ * [안정성 수정] Fork(대문자)는 실패하면(프로세스 수 한도 등) 서버를 exit시켰음.
+ * fork의 반환값을 확인해서 실패하면 이 요청만 끝냄.
+ * 200 헤더는 이미 나갔으므로 500으로 바꿀 수 없어 연결만 닫음(main이 close).
+ * 헤더를 fork 뒤로 옮기면 부모의 헤더와 자식의 출력 순서가 섞일 수 있어
+ * 순서는 Tiny와 같게 둠.
  */
 static void cgi_serve(int fd, const char *filename, const char *cgiargs)
 {
     char header[MAXLINE];
     int header_len;
+    pid_t pid;
 
     /* Tiny는 sprintf + Rio_writen을 두 번 → snprintf 한 번으로 만들어 한 번에 보냄 */
     header_len = snprintf(header, sizeof(header),
                           "HTTP/1.0 200 OK\r\n"
                           "Server: Tiny Web Server\r\n");
-    Rio_writen(fd, header, header_len);
-
-    if (Fork() == 0) {                          /* 자식 프로세스이면 */
-        cgi_child_run(fd, filename, cgiargs);   /* 자식 일은 함수로 분리 (돌아오지 않음) */
+    /* [안정성 수정] Rio_writen 대신 rio_writen. 이미 끊겼으면 자식을 만들지 않음 */
+    if (rio_writen(fd, header, header_len) != header_len) {
+        return;
     }
-    Wait(NULL); /* 부모: 자식이 끝날 때까지 기다렸다가 회수 (Tiny와 같음) */
+
+    pid = fork(); /* [안정성 수정] Fork 대신 fork */
+    if (pid < 0) {         /* 자식 생성 실패 */
+        perror("fork");    /* 원인만 출력하고 */
+        return;            /* 이 요청만 끝냄 (서버는 계속 동작) */
+    }
+    if (pid == 0) {                           /* 자식 프로세스이면 */
+        cgi_child_run(fd, filename, cgiargs); /* 자식 일은 함수로 분리 (돌아오지 않음) */
+    }
+    /* 부모: 방금 만든 자식이 끝날 때까지 기다렸다가 회수.
+     * Wait(대문자)도 실패하면 exit하므로 waitpid로 바꾸고 실패는 출력만 함 */
+    if (waitpid(pid, NULL, 0) < 0) {
+        perror("waitpid");
+    }
 }
 
 /*
  * 자식 프로세스에서 CGI 프로그램을 실행합니다.
  * Tiny의 serve_dynamic에서 if (Fork() == 0) { ... } 안에 있던 코드를 뺐습니다.
+ * 동작 변화 없음. (여기서 대문자 래퍼가 exit해도 자식만 끝나고 서버는 무사함)
  */
 static void cgi_child_run(int fd, const char *filename, const char *cgiargs)
 {
