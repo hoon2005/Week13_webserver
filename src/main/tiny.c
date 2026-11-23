@@ -7,6 +7,7 @@
  *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
  */
 #include "csapp.h"
+#include "net.h"
 #include <strings.h>
 
 void doit(int fd);
@@ -31,15 +32,28 @@ int main(int argc, char **argv)
 	exit(1);
     }
 
-    listenfd = Open_listenfd(argv[1]);
+    listenfd = net_open_listen(argv[1]);
+    if (listenfd < 0) {
+        fprintf(stderr, "%s: cannot listen on port %s\n", argv[0], argv[1]);
+        exit(1);
+    }
     while (1) {
-	clientlen = sizeof(clientaddr);
-	connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); //line:netp:tiny:accept
-        Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
-                    port, MAXLINE, 0);
-        printf("Accepted connection from (%s, %s)\n", hostname, port);
+        connfd = net_accept(listenfd, &clientaddr, &clientlen);
+        if (connfd < 0) {
+            fprintf(stderr, "%s: cannot accept connections, exiting\n",
+                    argv[0]);
+            close(listenfd);
+            exit(1);
+        }
+        /* 숫자로만 바꿔 DNS 조회를 하지 않습니다. 못 바꿔도 요청은 처리합니다. */
+        if (getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE,
+                        port, MAXLINE, NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
+            printf("Accepted connection from (%s, %s)\n", hostname, port);
+        }
 	doit(connfd);                                             //line:netp:tiny:doit
-	Close(connfd);                                            //line:netp:tiny:close
+        if (close(connfd) < 0) {
+            fprintf(stderr, "close(connfd): %s\n", strerror(errno));
+        }
     }
 }
 /* $end tinymain */
