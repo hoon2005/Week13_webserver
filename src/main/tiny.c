@@ -22,6 +22,7 @@ void clienterror(int fd, char *cause, char *errnum,
 int main(int argc, char **argv) 
 {
     int listenfd, connfd; // 두 소켓
+    int rc;
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr; // 클라이언트 주소 담을 공간
@@ -44,11 +45,19 @@ int main(int argc, char **argv)
 	if (connfd < 0) {
 	    continue; /* 이 연결만 포기하고 다음 손님을 기다립니다 */
 	}
-        Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
+        /* 로그용 변환이라 실패해도 서버를 끄지 않고 요청은 계속 처리합니다 */
+        rc = getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
                     port, MAXLINE, 0); //클라이언트 주소를 사람이 읽는 문자열 바꿈
-        printf("Accepted connection from (%s, %s)\n", hostname, port);
+        if (rc == 0) {
+            printf("Accepted connection from (%s, %s)\n", hostname, port);
+        } else {
+            fprintf(stderr, "getnameinfo 실패: %s\n", gai_strerror(rc));
+        }
 	doit(connfd);       // HTTP 요청읽고 응답                                      //line:netp:tiny:doit
-	Close(connfd);                                            //line:netp:tiny:close
+	/* close는 실패해도 다시 부르지 않습니다. 알리고 다음 손님으로 넘어갑니다 */
+	if (close(connfd) < 0) {                                  //line:netp:tiny:close
+	    fprintf(stderr, "close 실패: %s\n", strerror(errno));
+	}
     }
 }
 /* $end tinymain */
