@@ -3,11 +3,13 @@
  */
 #include "route.h"
 
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 static const char *backend_parse(struct backend *b, const char *s, size_t len);
 
@@ -128,6 +130,37 @@ struct route *route_table_find(struct route_table *table, const char *path,
         }
     }
     return best;
+}
+
+/* 주소가 이 컴퓨터의 것이면 1. 자기 주소에만 bind할 수 있다는 점을 이용함.
+ * "localhost" 같은 글자를 비교하면 다른 이름이나 IP로 적은 것을 놓침 */
+static int addr_is_local(struct sockaddr_in addr)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int local;
+
+    if (fd < 0) {
+        return 0;
+    }
+    addr.sin_port = 0; /* 아무 빈 포트. 실제로 기다리지는 않음 */
+    local = bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) == 0;
+    close(fd);
+    return local;
+}
+
+const struct backend *route_table_find_self(const struct route_table *table,
+                                            int port)
+{
+    for (int i = 0; i < table->count; i++) {
+        const struct route *route = &table->routes[i];
+        for (int j = 0; j < route->backend_count; j++) {
+            const struct backend *b = &route->backends[j];
+            if (ntohs(b->addr.sin_port) == port && addr_is_local(b->addr)) {
+                return b;
+            }
+        }
+    }
+    return NULL;
 }
 
 int route_next_backend(struct route *route)

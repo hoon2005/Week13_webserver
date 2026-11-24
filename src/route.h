@@ -45,6 +45,14 @@ void route_table_destroy(struct route_table *table);
 struct route *route_table_find(struct route_table *table, const char *path,
                                size_t len);
 
+/*
+ * port에서 모든 주소로 기다리는 이 서버를 가리키는 백엔드를 찾습니다. 없으면 NULL.
+ *   자기 자신에게 보내면 요청 하나가 끝없이 돌며 작업자를 모두 차지함
+ *   (RFC 9110 7.6). 다른 프록시를 거쳐 돌아오는 경우는 알 수 없음.
+ */
+const struct backend *route_table_find_self(const struct route_table *table,
+                                            int port);
+
 /* 이번 요청이 먼저 시도할 백엔드 번호 (Round-Robin) */
 int route_next_backend(struct route *route);
 

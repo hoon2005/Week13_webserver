@@ -121,6 +121,28 @@ static void test_prefix_matches_whole_segments(void)
     free_table(t);
 }
 
+static void test_self_backend_is_found(void)
+{
+    static const char *const self[] = {"/a/=127.0.0.1:8000",
+                                       "/a/=localhost:8000", "/a/=0.0.0.0:8000",
+                                       "/a/=127.0.0.1:8001,127.0.0.1:8000"};
+    static const char *const other[] = {"/a/=127.0.0.1:8001",
+                                        "/a/=192.0.2.1:8000"};
+
+    for (size_t i = 0; i < sizeof(self) / sizeof(self[0]); i++) {
+        struct route_table *t = new_table();
+        TEST_CHECK(route_table_add(t, self[i]) == NULL);
+        TEST_CHECK_(route_table_find_self(t, 8000) != NULL, "%s", self[i]);
+        free_table(t);
+    }
+    for (size_t i = 0; i < sizeof(other) / sizeof(other[0]); i++) {
+        struct route_table *t = new_table();
+        TEST_CHECK(route_table_add(t, other[i]) == NULL);
+        TEST_CHECK_(route_table_find_self(t, 8000) == NULL, "%s", other[i]);
+        free_table(t);
+    }
+}
+
 static void test_round_robin(void)
 {
     struct route_table *t = new_table();
@@ -182,6 +204,7 @@ TEST_LIST = {
      test_too_many_rules_and_backends},
     {"여러 규칙이 맞으면 가장 긴 접두사를 고른다", test_longest_prefix_wins},
     {"/api/ 규칙은 /apix/에 걸리지 않는다", test_prefix_matches_whole_segments},
+    {"이 서버 자신을 가리키는 백엔드를 찾는다", test_self_backend_is_found},
     {"요청마다 다음 백엔드를 차례로 고른다", test_round_robin},
     {"여러 스레드가 골라도 백엔드마다 같은 횟수다",
      test_round_robin_with_threads},

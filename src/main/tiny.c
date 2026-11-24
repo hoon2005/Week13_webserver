@@ -130,6 +130,8 @@ static int port_arg(const char *prog, const char *s)
 
 static void config_parse(int argc, char **argv)
 {
+    const struct backend *self;
+
     if (argc < 2) {
         usage(argv[0]);
     }
@@ -160,6 +162,12 @@ static void config_parse(int argc, char **argv)
         } else {
             usage(argv[0]);
         }
+    }
+    self = route_table_find_self(&routes, cfg.port);
+    if (self != NULL) {
+        fprintf(stderr, "--proxy: 백엔드 %s는 이 서버 자신입니다\n",
+                self->name);
+        exit(1);
     }
 }
 
