@@ -24,8 +24,8 @@ static int number_parse(const char *part, int *out)
     }
     errno = 0;
     v = strtol(s, &end, 10);
-    if (*end != '\0' || errno == ERANGE || v < INT_MIN / 2 || v > INT_MAX / 2) {
-        return -1; /* 숫자가 아니거나, 더했을 때 int를 넘을 수 있는 값 */
+    if (*end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX) {
+        return -1; /* 숫자가 아니거나 int 범위 밖 */
     }
     *out = (int)v;
     return 0;
@@ -72,6 +72,7 @@ int main(void)
     const char *query = input_read(input, sizeof(input));
     char *amp;
     int n1, n2;
+    long long sum = 0; /* int 둘의 합이 넘치지 않게 더 큰 형으로 더함 */
 
     snprintf(work, sizeof(work), "%s", query);
     amp = strchr(work, '&');
@@ -81,16 +82,21 @@ int main(void)
                  "Usage: /cgi-bin/adder?1&2 or POST a=1&b=2\r\n");
     } else {
         *amp = '\0';
-        if (number_parse(work, &n1) < 0 || number_parse(amp + 1, &n2) < 0) {
+        int valid =
+            number_parse(work, &n1) == 0 && number_parse(amp + 1, &n2) == 0;
+        if (valid) {
+            sum = (long long)n1 + n2;
+        }
+        if (!valid || sum < INT_MIN || sum > INT_MAX) {
             snprintf(content, sizeof(content),
                      "Welcome to add.com: THE Internet addition portal.\r\n<p>"
                      "Invalid number. Use integers like 1&2 or a=1&b=2\r\n");
         } else {
             snprintf(content, sizeof(content),
                      "Welcome to add.com: THE Internet addition portal.\r\n<p>"
-                     "The answer is: %d + %d = %d\r\n<p>"
+                     "The answer is: %d + %d = %lld\r\n<p>"
                      "Thanks for visiting!\r\n",
-                     n1, n2, n1 + n2);
+                     n1, n2, sum);
         }
     }
 

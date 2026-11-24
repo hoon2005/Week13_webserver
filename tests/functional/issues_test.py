@@ -230,5 +230,28 @@ class CgiResponseTest(unittest.TestCase):
         self.assertEqual(headers["content-length"], "2")
 
 
+class AdderRangeTest(unittest.TestCase):
+    """A2: 입력과 합이 모두 int 범위면 계산한다"""
+
+    def test_합이_int_안이면_계산하고_넘으면_안내한다(self):
+        server = Server("--timeout", "1")
+        try:
+            for query, expected in (
+                ("2000000000&1", b"= 2000000001"),
+                ("2147483647&0", b"= 2147483647"),
+                ("-2147483648&0", b"= -2147483648"),
+                ("2147483647&1", b"Invalid number"),
+                ("-2147483648&-1", b"Invalid number"),
+                ("2147483648&0", b"Invalid number"),
+                ("99999999999999999999&0", b"Invalid number"),
+            ):
+                with self.subTest(query=query):
+                    status, _, body, _ = get(server, "/cgi-bin/adder?" + query)
+                    self.assertEqual(status, 200)
+                    self.assertIn(expected, body)
+        finally:
+            server.stop()
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
