@@ -107,7 +107,7 @@ $(RELEASE_BUILD) $(RELEASE_BUILD)/obj:
 
 # make tsan: 단위 테스트를 ThreadSanitizer로 빌드해 돌립니다. 스레드를 쓰는 코드의
 # 데이터 경합을 찾습니다. TSan은 ASan과 함께 켤 수 없어 build/tsan/에 따로 빌드합니다.
-# 동시성 모델을 정하기 전이라 make verify와 CI에는 아직 넣지 않습니다.
+# make verify에는 넣지 않고 CI에서 따로 실행합니다 (스레드 풀 작업 큐 검사).
 TSAN_BUILD    := $(BUILD)/tsan
 TSAN_CFLAGS   := -std=c11 -Wall -Wextra -Werror -g -O1 -fno-omit-frame-pointer \
                  -fsanitize=thread -MMD -MP -pthread

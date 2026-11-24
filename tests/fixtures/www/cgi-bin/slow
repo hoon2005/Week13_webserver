@@ -1,0 +1,4 @@
+#!/bin/sh
+# 테스트용 CGI: 끝나지 않음 → 서버는 10초 뒤 kill하고 504
+# exec로 sh 자신이 sleep이 되어, kill 하나로 프로세스가 남지 않음
+exec sleep 30
