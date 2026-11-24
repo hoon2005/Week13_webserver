@@ -33,3 +33,4 @@ jobs:
       - run: pip install clang-format==21.1.8
       - run: clang-format --version
       - run: make verify
+      - run: make tsan
