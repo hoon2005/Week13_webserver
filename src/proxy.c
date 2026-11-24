@@ -9,10 +9,12 @@
 #include <poll.h>
 #include <time.h>
 
-/* 백엔드 읽기와 쓰기의 결과 (0 이상은 바이트 수) */
+/* 백엔드 연결, 읽기, 쓰기의 실패 (0 이상은 fd나 바이트 수) */
 #define IO_ERROR (-1)
 #define IO_TIMEOUT (-2)
+#define IO_NO_SOCKET (-3) /* 우리 서버가 소켓을 열지 못함 */
 
+static int io_failure(int err);
 static int backend_connect(const struct backend *b, long deadline);
 static int backend_write(int fd, const char *buf, size_t n, long deadline);
 static ssize_t backend_read(int fd, char *buf, size_t n, long deadline);
@@ -44,17 +46,17 @@ int proxy_open(struct proxy *p, const struct http_request *req,
     p->timeout_ms = timeout_sec * 1000;
 
     /* 1. 연결. 다음 백엔드로 넘어가도 마감 시각은 처음 것을 그대로 씀 */
-    for (int i = 0; i < count && p->fd < 0; i++) {
+    for (int i = 0; i < count; i++) {
         p->backend = &backends[(first + i) % count];
         rc = backend_connect(p->backend, deadline);
-        if (rc == IO_TIMEOUT) {
-            return 504;
+        if (rc != IO_ERROR) {
+            break; /* 연결됨, 시간 초과, 소켓 부족: 다음 백엔드가 도움이 안 됨 */
         }
-        p->fd = rc;
     }
-    if (p->fd < 0) {
-        return 502;
+    if (rc < 0) {
+        return rc == IO_TIMEOUT ? 504 : 502;
     }
+    p->fd = rc;
 
     /* 2. 요청 보내기 */
     head_len = proxy_request_build(req, head, sizeof(head));
@@ -89,6 +91,13 @@ int proxy_open(struct proxy *p, const struct http_request *req,
     return 0;
 }
 
+/* errno를 실패 종류로 바꿉니다. 우리 마감보다 먼저 운영체제가 시간 초과를
+ * 알릴 수도 있음 (--proxy-timeout이 아주 길 때) */
+static int io_failure(int err)
+{
+    return err == ETIMEDOUT ? IO_TIMEOUT : IO_ERROR;
+}
+
 /*
  * deadline(ms)까지 fd가 준비되기를 기다립니다. 준비되면 0.
  * 끊기거나 오류가 나도 0이고, 이어지는 read나 write가 그 오류를 알려 줌
@@ -114,7 +123,10 @@ static int fd_wait(int fd, short events, long deadline)
 }
 
 /*
- * 백엔드에 연결해 non-blocking 소켓을 돌려줍니다. 실패하면 IO_ERROR, IO_TIMEOUT.
+ * 백엔드에 연결해 non-blocking 소켓을 돌려줍니다.
+ *   IO_ERROR      이 백엔드에 연결하지 못함 (거부, 도달 불가 등)
+ *   IO_TIMEOUT    시간 초과
+ *   IO_NO_SOCKET  fd가 모자라는 등 우리 쪽 문제. 다른 백엔드도 마찬가지임
  * blocking connect는 꺼진 컴퓨터를 만나면 1분 넘게 멈출 수 있어, non-blocking으로
  * 시작하고 poll로 마감까지만 기다립니다.
  */
@@ -125,7 +137,7 @@ static int backend_connect(const struct backend *b, long deadline)
     socklen_t len = sizeof(err);
 
     if (fd < 0) {
-        return IO_ERROR;
+        return IO_NO_SOCKET;
     }
     fcntl(fd, F_SETFD, FD_CLOEXEC); /* CGI가 물려받지 않게 */
     fcntl(fd, F_SETFL, O_NONBLOCK);
@@ -133,14 +145,16 @@ static int backend_connect(const struct backend *b, long deadline)
 
     if (connect(fd, (const SA *)&b->addr, sizeof(b->addr)) < 0) {
         if (errno != EINPROGRESS) {
-            rc = IO_ERROR;
+            rc = io_failure(errno);
         } else {
             rc = fd_wait(fd, POLLOUT, deadline);
             /* 쓸 수 있게 됐어도 연결 실패일 수 있어 결과를 따로 확인 */
             if (rc == 0 &&
-                (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 ||
-                 err != 0)) {
-                rc = IO_ERROR;
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+                err = errno;
+            }
+            if (rc == 0 && err != 0) {
+                rc = io_failure(err);
             }
         }
     }
@@ -162,7 +176,7 @@ static int backend_write(int fd, const char *buf, size_t n, long deadline)
         }
         w = write(fd, buf, n);
         if (w < 0 && errno != EINTR && errno != EAGAIN) {
-            return IO_ERROR;
+            return io_failure(errno);
         }
         if (w > 0) {
             buf += w;
@@ -187,7 +201,7 @@ static ssize_t backend_read(int fd, char *buf, size_t n, long deadline)
             return r;
         }
         if (errno != EINTR && errno != EAGAIN) {
-            return IO_ERROR;
+            return io_failure(errno);
         }
     }
 }

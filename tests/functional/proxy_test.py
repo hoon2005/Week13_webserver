@@ -7,14 +7,19 @@
 phase2_test.py의 것을 씁니다.
 """
 
+import functools
+import os
+import resource
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
-from phase2_test import HOST, Server, exchange, find_free_port, get
+from phase2_test import BUILD_DIR, HOST, Server, exchange, find_free_port, get
 from phase2_test import read_response
 
 TIMEOUT_SEC = 1  # 시험용 --proxy-timeout
@@ -144,6 +149,25 @@ class RoutingTest(ProxyCase):
         ):
             with self.subTest(rules=rules), self.assertRaises(RuntimeError):
                 self.proxy(*rules)
+
+
+    def test_백엔드가_이_서버_자신이면_시작하지_않고_다른_포트는_허용한다(self):
+        tiny = os.path.join(BUILD_DIR, "tiny")
+        port = str(find_free_port())
+        for name in ("127.0.0.1", "localhost", "0.0.0.0"):
+            with self.subTest(name=name):
+                proc = subprocess.run(
+                    [tiny, port, "--proxy", "/api/=%s:%s" % (name, port)],
+                    capture_output=True, text=True, timeout=5)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("이 서버 자신", proc.stderr)
+        server, _ = self.one(reply(ok(b"api")))  # 같은 컴퓨터의 다른 포트
+        self.assertEqual(get(server, "/api/x")[2], b"api")
+
+    def test_끝의_빗금이_없는_경로는_규칙에_걸리지_않고_직접_처리한다(self):
+        server, b = self.one(reply(ok(b"api")))
+        self.assertEqual(get(server, "/api")[0], 404)
+        self.assertEqual(b.requests, [])
 
 
 class RequestTest(ProxyCase):
@@ -317,6 +341,31 @@ class FailureTest(ProxyCase):
         server = self.proxy("/api/=%s,%s" % (dead, alive.name))
         for _ in range(4):
             self.assertEqual(get(server, "/api/x")[2], b"alive")
+
+    def test_도달할_수_없는_백엔드_다음의_백엔드가_답한다(self):
+        # 브로드캐스트 주소에는 TCP로 연결할 수 없어 바로 오류가 남
+        alive = self.backend(reply(ok(b"alive")))
+        server = self.proxy("/api/=255.255.255.255:80," + alive.name)
+        for _ in range(4):
+            self.assertEqual(get(server, "/api/x")[2], b"alive")
+
+    def test_서버의_fd가_모자라면_다음_백엔드를_시도하지_않고_502다(self):
+        dead = ["%s:%d" % (HOST, find_free_port()) for _ in range(2)]
+        popen = functools.partial(
+            subprocess.Popen,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (20, 20)))
+        with mock.patch("phase2_test.subprocess.Popen", popen):
+            server = self.proxy("/api/=" + ",".join(dead))
+        # 접속을 fd 상한까지 채운 뒤, 먼저 연결된 손님이 요청함
+        socks = [server.connect() for _ in range(30)]
+        try:
+            time.sleep(0.3)
+            socks[0].sendall(b"GET /api/x HTTP/1.1\r\nHost: x\r\n\r\n")
+            self.assertEqual(read_response(socks[0].makefile("rb"))[0], 502)
+        finally:
+            for s in socks:
+                s.close()
+        self.assertIn("502 -> " + dead[0], self.log(server))  # 첫 백엔드에서 끝냄
 
     def test_요청을_보낸_뒤의_실패는_다른_백엔드로_다시_보내지_않는다(self):
         def hang_up(conn, head):
