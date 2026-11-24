@@ -18,7 +18,7 @@
  *   요청 하나: 요청 줄 → 헤더 → 헤더 검사 → (Expect) → 본문 → 경로 확인
  *             → 백엔드 / 정적 파일 / CGI → 응답 → keep-alive 판단
  *
- * 종료 (SIGINT, SIGTERM)
+ * 종료 (SIGINT, SIGTERM, SIGHUP)
  *   [시그널] 종료 플래그 → pipe에 알림 → 큐 종료
  *   [main]   accept 중단 → 작업자 join → 정리
  *   [작업자] 하던 요청 마무리 → 큐에 남은 연결마다 요청 하나 → 끝
@@ -82,6 +82,9 @@ static struct conn_queue queue;
 
 /* 종료가 시작되면 1. 시그널 스레드가 쓰고 작업자들이 읽음 */
 static atomic_int stopping;
+
+/* 작업자가 모두 끝났으면 1. main이 쓰고 시그널 스레드가 읽음 */
+static atomic_int finished;
 
 /* 종료 알림. 시그널 스레드가 한 번 쓰고 아무도 읽지 않으므로, main과 모든
  * 작업자의 poll이 계속 "읽을 수 있음"으로 깨어남 */
@@ -184,7 +187,8 @@ int main(int argc, char **argv)
 {
     pthread_t *workers;
     pthread_t signal_thread;
-    static sigset_t stop_signals; /* 시그널 스레드가 계속 쓰므로 static */
+    sigset_t stop_signals;
+    struct sigaction hup;
     const char *path;
     size_t path_size;
     int listenfd;
@@ -237,18 +241,22 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    /* 스레드를 만들기 전에 막아야 모든 스레드가 물려받아, 두 시그널이 sigwait로
+    /* 스레드를 만들기 전에 막아야 모든 스레드가 물려받아, 이 시그널들이 sigwait로
      * 기다리는 시그널 스레드에만 전달됨 */
     sigemptyset(&stop_signals);
     sigaddset(&stop_signals, SIGINT);
     sigaddset(&stop_signals, SIGTERM);
+    /* 터미널을 닫을 때도 마무리함. CGI는 다른 프로세스 그룹이라 터미널이 보내는
+     * SIGHUP을 받지 못함. nohup으로 띄웠으면(무시 상태) 그대로 둠 */
+    if (sigaction(SIGHUP, NULL, &hup) == 0 && hup.sa_handler != SIG_IGN) {
+        sigaddset(&stop_signals, SIGHUP);
+    }
     if (pipe(stop_pipe) < 0 ||
         pthread_sigmask(SIG_BLOCK, &stop_signals, NULL) != 0 ||
         pthread_create(&signal_thread, NULL, signal_main, &stop_signals) != 0) {
         fprintf(stderr, "종료 처리를 준비하지 못했습니다\n");
         exit(1);
     }
-    pthread_detach(signal_thread); /* 정상 종료 때는 sigwait에 멈춘 채 끝남 */
     fcntl(stop_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(stop_pipe[1], F_SETFD, FD_CLOEXEC);
 
@@ -293,6 +301,11 @@ int main(int argc, char **argv)
     for (int i = 0; i < cfg.threads; i++) {
         pthread_join(workers[i], NULL);
     }
+    /* 시그널 스레드까지 끝낸 뒤에 해제함. 남겨 두면 이때 온 SIGINT가 해제된
+     * CGI 목록을 읽어 엉뚱한 pid를 죽일 수 있음 */
+    atomic_store(&finished, 1);
+    pthread_kill(signal_thread, SIGTERM);
+    pthread_join(signal_thread, NULL);
     free(workers);
     free(cgi_pids);
     free(cfg.path_env);
@@ -311,6 +324,7 @@ int main(int argc, char **argv)
  *     큐가 비어 pop에서 잠든 작업자         → conn_queue_shutdown
  *   두 번째부터는 SIGINT만 강제 종료로 봄. 실행 도구가 SIGINT와 SIGTERM을 함께
  *   보내는 경우에 뜻하지 않게 강제 종료하지 않기 위함.
+ *   작업자가 모두 끝났으면(finished) 어떤 시그널로 깨어났든 정상으로 끝냄.
  */
 static void *signal_main(void *arg)
 {
@@ -327,6 +341,9 @@ static void *signal_main(void *arg)
 
     do {
         sigwait(stop_signals, &sig);
+        if (atomic_load(&finished)) {
+            return NULL;
+        }
     } while (sig != SIGINT);
     printf("강제 종료\n");
     cgi_kill_all();
@@ -1048,15 +1065,18 @@ static pid_t cgi_fork(void)
 /*
  * 끝난 CGI를 회수하고 목록에서 지웁니다. waitpid의 결과를 그대로 돌려줌.
  *   회수하면 커널이 그 pid를 다른 프로세스에 줄 수 있음. 회수와 지우기를 한 락
- *   안에서 해야 강제 종료가 엉뚱한 프로세스를 죽이지 않음.
+ *   안에서 해야 강제 종료가 엉뚱한 프로세스를 죽이지 않음. 락을 잡은 채 기다리면
+ *   다른 CGI까지 멈추므로 기다리지 않고(WNOHANG) 확인만 함.
  */
-static pid_t cgi_reap(pid_t pid, int *wstatus, int options)
+static pid_t cgi_reap(pid_t pid, int *wstatus)
 {
     pid_t w;
+    int err;
 
     pthread_mutex_lock(&cgi_lock);
-    w = waitpid(pid, wstatus, options);
-    if (w == pid || (w < 0 && errno != EINTR)) { /* 더 기다릴 것이 없음 */
+    w = waitpid(pid, wstatus, WNOHANG);
+    err = errno;
+    if (w == pid || (w < 0 && err != EINTR)) { /* 더 기다릴 것이 없음 */
         for (int i = 0; i < cfg.threads; i++) {
             if (cgi_pids[i] == pid) {
                 cgi_pids[i] = 0;
@@ -1064,7 +1084,16 @@ static pid_t cgi_reap(pid_t pid, int *wstatus, int options)
         }
     }
     pthread_mutex_unlock(&cgi_lock);
+    errno = err;
     return w;
+}
+
+/* CGI를 그 자식들까지 죽입니다. CGI가 다른 그룹으로 옮겨 갔으면 그룹에 보낸
+ * 시그널이 닿지 않으므로 CGI 자신에게도 보냄. 회수하기 전에만 불러야 함 */
+static void cgi_kill(pid_t pid)
+{
+    kill(-pid, SIGKILL);
+    kill(pid, SIGKILL);
 }
 
 /* 강제 종료: 실행 중인 CGI와 그 자식들을 모두 죽입니다.
@@ -1074,7 +1103,7 @@ static void cgi_kill_all(void)
     pthread_mutex_lock(&cgi_lock);
     for (int i = 0; i < cfg.threads; i++) {
         if (cgi_pids[i] != 0) {
-            kill(-cgi_pids[i], SIGKILL);
+            cgi_kill(cgi_pids[i]);
         }
     }
 }
@@ -1156,7 +1185,7 @@ static int cgi_output_collect(pid_t pid, int outfd, char **out,
     }
 
     while (1) { /* EOF 뒤: 끝날 때까지 마감 안에서 기다림 */
-        pid_t w = cgi_reap(pid, &wstatus, WNOHANG);
+        pid_t w = cgi_reap(pid, &wstatus);
         if (w == pid) {
             break;
         }
@@ -1177,8 +1206,14 @@ static int cgi_output_collect(pid_t pid, int outfd, char **out,
     goto done;
 
 kill_child:
-    kill(-pid, SIGKILL);
-    while (cgi_reap(pid, NULL, 0) < 0 && errno == EINTR) {
+    cgi_kill(pid);
+    while (1) { /* SIGKILL을 받아도 끝나기까지 잠깐 걸림 */
+        pid_t w = cgi_reap(pid, NULL);
+        struct timespec ts = {0, 1000 * 1000};
+        if (w == pid || (w < 0 && errno != EINTR)) {
+            break;
+        }
+        nanosleep(&ts, NULL);
     }
 
 done:

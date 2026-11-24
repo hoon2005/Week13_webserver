@@ -265,6 +265,51 @@ class GracefulTest(ShutdownCase):
             self.assertEqual(read_response(sock.makefile("rb"))[2], b"done")
         self.wait_exit(server, 3, 0)
 
+    def test_정리가_끝난_뒤의_SIGINT는_강제_종료가_아니고_해제한_목록을_읽지_않는다(self):
+        for _ in range(5):
+            server = self.server()
+            server.proc.send_signal(signal.SIGINT)
+            self.assertTrue(wait_until(lambda: "종료 완료" in self.log(server), 3))
+            for _ in range(50):
+                server.proc.send_signal(signal.SIGINT)
+            self.wait_exit(server, 3, 0)
+            self.assertNotIn("강제 종료\n", self.log(server))
+
+    def test_SIGINT를_연달아_보내도_메모리_오류_없이_끝난다(self):
+        # 언제 도착했는지에 따라 정상 종료(0)와 강제 종료(1)가 모두 맞음
+        for i in range(30):
+            server = self.server()
+            for _ in range(6):
+                server.proc.send_signal(signal.SIGINT)
+                time.sleep(0.0005 * (i % 6))
+            self.assertIn(server.proc.wait(timeout=3), (0, 1))
+            self.assertNotIn("Sanitizer", self.log(server))
+
+    def test_터미널이_닫히면_SIGHUP으로_하던_요청을_마치고_끝난다(self):
+        server = self.server()
+        self.cgi(server, "work", "echo $$ > work.pid\nsleep 1\n"
+                                 "printf 'Content-Type: text/plain\\n\\ndone'\n")
+        with server.connect() as sock:
+            sock.sendall(cgi_request("work"))
+            self.started_pid(server, "work.pid")
+            os.killpg(server.proc.pid, signal.SIGHUP)
+            time.sleep(0.1)
+            os.killpg(server.proc.pid, signal.SIGHUP)  # 두 번째도 강제 종료가 아님
+            self.assertEqual(read_response(sock.makefile("rb"))[2], b"done")
+        self.wait_exit(server, 3, 0)
+
+    def test_nohup으로_띄운_서버는_SIGHUP에_끝나지_않는다(self):
+        old = signal.signal(signal.SIGHUP, signal.SIG_IGN)  # nohup처럼 무시를 물려줌
+        try:
+            server = self.server()
+        finally:
+            signal.signal(signal.SIGHUP, old)
+        server.proc.send_signal(signal.SIGHUP)
+        time.sleep(0.5)
+        self.assertEqual(get(server, "/home.html")[0], 200)
+        server.proc.send_signal(signal.SIGTERM)
+        self.wait_exit(server, 3, 0)
+
 
 class ForcedTest(ShutdownCase):
     def test_정리_중에_SIGINT가_또_오면_실행_중인_CGI와_그_자식까지_끝내고_종료한다(self):
@@ -311,6 +356,49 @@ class CgiProcessTest(ShutdownCase):
             child = self.started_pid(server, "child.pid")
             self.assertEqual(read_response(sock.makefile("rb"))[0], 504)
         self.assertTrue(wait_until(lambda: not alive(child), 2))
+
+    def test_다른_그룹으로_옮겨_간_CGI도_제한_시간에_끝나고_다른_CGI를_막지_않는다(self):
+        server = self.server()
+        path = os.path.join(server.www, "cgi-bin", "mover")
+        with open(path, "w") as f:
+            f.write("#!%s\nimport os, time\n"
+                    "os.setpgid(0, os.getpgid(os.getppid()))\n"
+                    "open('mover.pid', 'w').write('%%d\\n' %% os.getpid())\n"
+                    "time.sleep(25)\n" % sys.executable)
+        os.chmod(path, 0o755)
+        start = time.monotonic()
+        with server.connect(timeout=30) as sock:
+            sock.sendall(cgi_request("mover"))
+            pid = self.started_pid(server, "mover.pid")
+            worst = 0
+            while time.monotonic() - start < 11:
+                begin = time.monotonic()
+                self.assertIn(b"1 + 2 = 3", get(server, "/cgi-bin/adder?1&2")[2])
+                worst = max(worst, time.monotonic() - begin)
+                time.sleep(0.2)
+            self.assertEqual(read_response(sock.makefile("rb"))[0], 504)
+            self.assertLess(time.monotonic() - start, 13)
+        self.assertLess(worst, 2)
+        self.assertFalse(alive(pid))
+
+    def test_다른_그룹으로_옮겨_간_CGI도_강제_종료_때_끝난다(self):
+        server = self.server()
+        path = os.path.join(server.www, "cgi-bin", "mover")
+        with open(path, "w") as f:
+            f.write("#!%s\nimport os, signal, time\n"
+                    "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+                    "os.setpgid(0, os.getpgid(os.getppid()))\n"
+                    "open('mover.pid', 'w').write('%%d\\n' %% os.getpid())\n"
+                    "time.sleep(25)\n" % sys.executable)
+        os.chmod(path, 0o755)
+        with server.connect() as sock:
+            sock.sendall(cgi_request("mover"))
+            pid = self.started_pid(server, "mover.pid")
+            for _ in range(2):
+                server.proc.send_signal(signal.SIGINT)
+                time.sleep(0.3)
+            self.wait_exit(server, 2, 1)
+        self.assertTrue(wait_until(lambda: not alive(pid), 2))
 
     def test_CGI는_시그널을_기본_동작으로_시작한다(self):
         # 서버의 차단이나 무시를 물려받으면 자신에게 보낸 시그널에 죽지 않고 200이 됨
