@@ -5,6 +5,7 @@
  *     M4 스레드 풀(작업 큐는 src/conn_queue.c), 소켓 타임아웃, fd 상속 차단
  *     M5 요청 파서(src/http.c), 본문, Expect, CGI 구조 변경, keep-alive
  *     M6 Reverse Proxy (규칙은 src/route.c, 중계는 src/proxy.c)
+ *     M7 요청 마감, keep-alive 양보, 안전한 종료
  *
  * 사용법:
  *   ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
@@ -16,6 +17,12 @@
  *   [작업자] 큐에서 꺼내기 → rio 준비(연결당 한 번) → 요청 반복 처리 → close
  *   요청 하나: 요청 줄 → 헤더 → 헤더 검사 → (Expect) → 본문 → 경로 확인
  *             → 백엔드 / 정적 파일 / CGI → 응답 → keep-alive 판단
+ *
+ * 종료 (SIGINT, SIGTERM)
+ *   [시그널] 종료 플래그 → pipe에 알림 → 큐 종료
+ *   [main]   accept 중단 → 작업자 join → 정리
+ *   [작업자] 하던 요청 마무리 → 큐에 남은 연결마다 요청 하나 → 끝
+ *   정리 중에 SIGINT가 또 오면 실행 중인 CGI를 죽이고 바로 종료
  */
 #if defined(__linux__)
 /* syscall(SYS_close_range)용. _GNU_SOURCE는 csapp.h의 gai_error와 충돌해서 쓰지 않음 */
@@ -31,6 +38,7 @@
 #include <ctype.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdatomic.h>
 #include <strings.h>
 #include <time.h>
 #if defined(__linux__)
@@ -72,6 +80,17 @@ static struct route_table routes;
 
 /* main이 넣고 작업자가 꺼내는 작업 큐. 응답할 때도 기다리는 손님이 있는지 봄 */
 static struct conn_queue queue;
+
+/* 종료가 시작되면 1. 시그널 스레드가 쓰고 작업자들이 읽음 */
+static atomic_int stopping;
+
+/* 종료 알림. 시그널 스레드가 한 번 쓰고 아무도 읽지 않으므로, main과 모든
+ * 작업자의 poll이 계속 "읽을 수 있음"으로 깨어남 */
+static int stop_pipe[2];
+
+/* 실행 중인 CGI. 강제 종료 때 남기지 않으려고 적어 둠 (작업자마다 최대 하나) */
+static pid_t *cgi_pids;
+static pthread_mutex_t cgi_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void usage(const char *prog)
 {
@@ -143,6 +162,8 @@ static int listen_socket_open(const char *port);
 static int accept_cloexec(int listenfd);
 static void socket_options_set(int connfd);
 static void *worker_main(void *arg);
+static void *signal_main(void *arg);
+static void cgi_kill_all(void);
 static enum conn_next serve_connection(int connfd);
 static void connection_close_lingering(int connfd);
 static void connection_reset_set(int connfd);
@@ -150,6 +171,8 @@ static void connection_reset_set(int connfd);
 int main(int argc, char **argv)
 {
     pthread_t *workers;
+    pthread_t signal_thread;
+    static sigset_t stop_signals; /* 시그널 스레드가 계속 쓰므로 static */
     const char *path;
     int listenfd;
 
@@ -189,10 +212,27 @@ int main(int argc, char **argv)
         exit(1);
     }
     workers = malloc(sizeof(pthread_t) * (size_t)cfg.threads);
-    if (workers == NULL) {
+    cgi_pids = calloc((size_t)cfg.threads, sizeof(pid_t));
+    if (workers == NULL || cgi_pids == NULL) {
         fprintf(stderr, "작업자 목록을 만들지 못했습니다\n");
         exit(1);
     }
+
+    /* 스레드를 만들기 전에 막아야 모든 스레드가 물려받아, 두 시그널이 sigwait로
+     * 기다리는 시그널 스레드에만 전달됨 */
+    sigemptyset(&stop_signals);
+    sigaddset(&stop_signals, SIGINT);
+    sigaddset(&stop_signals, SIGTERM);
+    if (pipe(stop_pipe) < 0 ||
+        pthread_sigmask(SIG_BLOCK, &stop_signals, NULL) != 0 ||
+        pthread_create(&signal_thread, NULL, signal_main, &stop_signals) != 0) {
+        fprintf(stderr, "종료 처리를 준비하지 못했습니다\n");
+        exit(1);
+    }
+    pthread_detach(signal_thread); /* 정상 종료 때는 sigwait에 멈춘 채 끝남 */
+    fcntl(stop_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(stop_pipe[1], F_SETFD, FD_CLOEXEC);
+
     for (int i = 0; i < cfg.threads; i++) {
         int rc = pthread_create(&workers[i], NULL, worker_main, NULL);
         if (rc != 0) {
@@ -202,13 +242,22 @@ int main(int argc, char **argv)
     }
 
     /* main은 accept만 함. 큐가 가득 차면 conn_queue_push 안에서 기다림 (503 없음) */
-    while (1) {
-        int connfd = accept_cloexec(listenfd);
+    while (!atomic_load(&stopping)) {
+        struct pollfd p[2] = {{listenfd, POLLIN, 0}, {stop_pipe[0], POLLIN, 0}};
+        int connfd;
+
+        if (poll(p, 2, -1) < 0 || p[1].revents != 0) {
+            continue;
+        }
+        connfd = accept_cloexec(listenfd);
         if (connfd < 0) {
-            if (errno != EINTR && errno != ECONNABORTED) {
+            int err = errno; /* perror가 errno를 바꿀 수 있음 */
+
+            /* poll 뒤에 손님이 먼저 끊으면 EAGAIN이나 ECONNABORTED */
+            if (err != EINTR && err != ECONNABORTED && err != EAGAIN) {
                 perror("accept");
             }
-            if (errno == EMFILE || errno == ENFILE) {
+            if (err == EMFILE || err == ENFILE) {
                 /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
                 struct timespec ts = {0, 10 * 1000 * 1000};
                 nanosleep(&ts, NULL);
@@ -217,10 +266,51 @@ int main(int argc, char **argv)
         }
         socket_options_set(connfd);
         if (conn_queue_push(&queue, connfd) < 0) {
-            close(connfd); /* 종료 중 (M7) */
+            close(connfd); /* 종료가 시작돼 큐에 넣지 못한 연결 */
         }
     }
-    /* 종료 처리(sigwait 스레드, pthread_join)는 M7에서 추가 */
+
+    close(listenfd);
+    for (int i = 0; i < cfg.threads; i++) {
+        pthread_join(workers[i], NULL);
+    }
+    free(workers);
+    free(cgi_pids);
+    conn_queue_destroy(&queue);
+    route_table_destroy(&routes);
+    printf("종료 완료\n");
+    return 0;
+}
+
+/*
+ * 시그널 스레드. 핸들러 안에서는 mutex를 쓸 수 없지만, sigwait로 받으면 보통
+ * 스레드처럼 큐를 만질 수 있습니다.
+ *   기다리는 곳마다 깨우는 방법이 다름
+ *     poll 중인 main, 쉬는 keep-alive 연결  → pipe
+ *     큐가 가득 차 push에서 잠든 main       → conn_queue_shutdown
+ *     큐가 비어 pop에서 잠든 작업자         → conn_queue_shutdown
+ *   두 번째부터는 SIGINT만 강제 종료로 봄. 실행 도구가 SIGINT와 SIGTERM을 함께
+ *   보내는 경우에 뜻하지 않게 강제 종료하지 않기 위함.
+ */
+static void *signal_main(void *arg)
+{
+    const sigset_t *stop_signals = arg;
+    int sig;
+
+    sigwait(stop_signals, &sig);
+    printf("종료 시작: 하던 요청을 마칩니다 (Ctrl+C를 다시 누르면 강제 종료)\n");
+    atomic_store(&stopping, 1);
+    if (write(stop_pipe[1], "x", 1) < 0) {
+        perror("stop pipe");
+    }
+    conn_queue_shutdown(&queue);
+
+    do {
+        sigwait(stop_signals, &sig);
+    } while (sig != SIGINT);
+    printf("강제 종료\n");
+    cgi_kill_all();
+    _exit(1);
 }
 
 /* 작업자: 큐에서 연결을 꺼내 끝날 때까지 처리 → 닫기 → 반복.
@@ -258,7 +348,10 @@ static int listen_socket_open(const char *port)
         perror("socket");
         return -1;
     }
-    if (fcntl(listenfd, F_SETFD, FD_CLOEXEC) < 0) {
+    /* non-blocking: poll 뒤 accept 전에 손님이 끊어도 main이 accept에서 멈추지
+     * 않게 함. 멈추면 종료 알림을 보지 못함 */
+    if (fcntl(listenfd, F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(listenfd, F_SETFL, O_NONBLOCK) < 0) {
         perror("fcntl");
         close(listenfd);
         return -1;
@@ -300,6 +393,7 @@ static int accept_cloexec(int listenfd)
     int connfd = accept(listenfd, NULL, NULL);
     if (connfd >= 0) {
         fcntl(connfd, F_SETFD, FD_CLOEXEC);
+        fcntl(connfd, F_SETFL, 0); /* macOS는 리스닝 소켓의 O_NONBLOCK을 물려줌 */
     }
     return connfd;
 #endif
@@ -329,13 +423,14 @@ static void socket_options_set(int connfd)
 /* ============================== 응답 쓰기 ============================== */
 
 /*
- * 응답 헤더를 쓰기 직전에 부릅니다. 큐에서 기다리는 손님이 있으면 keep-alive를
- * 포기합니다. 작업자보다 많은 손님이 왔을 때, 먼저 온 연결들이 쉬지 않고 요청하면
- * 나중에 온 손님이 요청 수 상한(100건)까지 기다리게 되기 때문입니다.
+ * 응답 헤더를 쓰기 직전에 부릅니다. 종료 중이거나 큐에서 기다리는 손님이 있으면
+ * keep-alive를 포기합니다. 작업자보다 많은 손님이 왔을 때, 먼저 온 연결들이 쉬지
+ * 않고 요청하면 나중에 온 손님이 요청 수 상한(100건)까지 기다리게 되기 때문입니다.
  */
 static void conn_next_yield(enum conn_next *next)
 {
-    if (*next == CONN_KEEP && conn_queue_has_waiting(&queue)) {
+    if (*next == CONN_KEEP &&
+        (atomic_load(&stopping) || conn_queue_has_waiting(&queue))) {
         *next = CONN_CLOSE_REPLIED;
     }
 }
@@ -428,7 +523,7 @@ static void request_log(const struct http_request *req, int status,
 /* ============================== M5: 연결과 요청 처리 ============================== */
 
 static long now_ms(void);
-static int request_wait(int fd, rio_t *rio);
+static int request_wait(int fd, rio_t *rio, int is_first);
 static enum conn_next request_handle(int fd, rio_t *rio, int can_keep);
 static int request_route(int fd, struct http_request *req, enum conn_next *next,
                          char *note, size_t note_size);
@@ -447,7 +542,7 @@ static enum conn_next serve_connection(int connfd)
     rio_readinitb(&rio, connfd);
     rio.rio_idle_ms = cfg.timeout * 1000;
     for (int n = 1; next == CONN_KEEP; n++) {
-        if (!request_wait(connfd, &rio)) {
+        if (!request_wait(connfd, &rio, n == 1)) {
             return CONN_CLOSE_NOW;
         }
         next = request_handle(connfd, &rio, n < cfg.keepalive_max);
@@ -459,8 +554,12 @@ static enum conn_next serve_connection(int connfd)
  * 다음 요청의 첫 바이트를 기다립니다. 왔으면 1, --timeout 안에 안 오면 0.
  * 파이프라이닝한 다음 요청은 이미 rio 버퍼에 있고 소켓은 비어 있을 수 있으므로
  * 버퍼를 먼저 봅니다. 끊긴 연결도 1이고, 이어지는 읽기가 끊긴 것을 알아냅니다.
+ *
+ * 두 번째 요청부터는 종료 알림도 함께 기다려 쉬던 연결을 바로 닫습니다(0).
+ * 이미 도착한 요청이 있으면 종료 중이어도 그 요청은 처리합니다. 첫 요청은 종료
+ * 전에 받은 손님이므로 알림과 상관없이 기다립니다.
  */
-static int request_wait(int fd, rio_t *rio)
+static int request_wait(int fd, rio_t *rio, int is_first)
 {
     long deadline = now_ms() + cfg.timeout * 1000L;
 
@@ -468,14 +567,14 @@ static int request_wait(int fd, rio_t *rio)
         return 1;
     }
     while (1) {
-        struct pollfd p = {fd, POLLIN, 0};
+        struct pollfd p[2] = {{fd, POLLIN, 0}, {stop_pipe[0], POLLIN, 0}};
         long left = deadline - now_ms();
-        int r = left > 0 ? poll(&p, 1, (int)left) : 0;
+        int r = left > 0 ? poll(p, is_first ? 1 : 2, (int)left) : 0;
 
         if (r < 0 && errno == EINTR) {
             continue;
         }
-        return r > 0;
+        return r > 0 && p[0].revents != 0;
     }
 }
 
@@ -871,10 +970,76 @@ static void child_close_fds(void)
 }
 
 /*
+ * CGI를 시작하고 목록에 적습니다. fork의 결과를 그대로 돌려줌.
+ *   CGI는 자기 프로세스 그룹을 가짐. 터미널의 Ctrl+C는 같은 그룹 전체에 가므로,
+ *   서버와 같은 그룹이면 첫 Ctrl+C에 CGI가 죽어 하던 요청을 마칠 수 없음.
+ *   그룹은 자식과 부모가 모두 정함. 어느 쪽이 먼저 실행될지 모르기 때문.
+ *   fork와 목록 적기를 한 락 안에서 함. 그 사이에 강제 종료가 끼어들면 목록에
+ *   없는 CGI가 남음.
+ */
+static pid_t cgi_fork(void)
+{
+    pid_t pid;
+
+    pthread_mutex_lock(&cgi_lock);
+    pid = fork();
+    if (pid == 0) {
+        setpgid(0, 0);
+        return 0; /* 자식은 락을 쓰지 않고 execve나 _exit로 감 */
+    }
+    if (pid > 0) {
+        setpgid(pid, pid);
+        for (int i = 0; i < cfg.threads; i++) {
+            if (cgi_pids[i] == 0) {
+                cgi_pids[i] = pid;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&cgi_lock);
+    return pid;
+}
+
+/*
+ * 끝난 CGI를 회수하고 목록에서 지웁니다. waitpid의 결과를 그대로 돌려줌.
+ *   회수하면 커널이 그 pid를 다른 프로세스에 줄 수 있음. 회수와 지우기를 한 락
+ *   안에서 해야 강제 종료가 엉뚱한 프로세스를 죽이지 않음.
+ */
+static pid_t cgi_reap(pid_t pid, int *wstatus, int options)
+{
+    pid_t w;
+
+    pthread_mutex_lock(&cgi_lock);
+    w = waitpid(pid, wstatus, options);
+    if (w == pid || (w < 0 && errno != EINTR)) { /* 더 기다릴 것이 없음 */
+        for (int i = 0; i < cfg.threads; i++) {
+            if (cgi_pids[i] == pid) {
+                cgi_pids[i] = 0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&cgi_lock);
+    return w;
+}
+
+/* 강제 종료: 실행 중인 CGI와 그 자식들을 모두 죽입니다.
+ * 락을 풀지 않아 그 뒤로 새 CGI가 시작되지 않음 (부른 쪽이 바로 _exit) */
+static void cgi_kill_all(void)
+{
+    pthread_mutex_lock(&cgi_lock);
+    for (int i = 0; i < cfg.threads; i++) {
+        if (cgi_pids[i] != 0) {
+            kill(-cgi_pids[i], SIGKILL);
+        }
+    }
+}
+
+/*
  * CGI 출력을 파이프에서 끝까지 모읍니다.
  *   마감 시간(시작 + 10초)까지 poll로 기다리며 읽음.
  *   1 MiB 초과 → kill → FAILED(500), 시간 초과 → kill → TIMEOUT(504).
- *   EOF 뒤에도 CGI가 계속 돌 수 있어 waitpid(WNOHANG)를 마감까지 반복 (4.3).
+ *   EOF 뒤에도 CGI가 계속 돌 수 있어 회수(WNOHANG)를 마감까지 반복 (4.3).
+ *   kill은 프로세스 그룹 전체에 보내 CGI가 만든 자식도 함께 정리.
  *   성공하면 *out에 malloc한 출력 (호출한 쪽이 free).
  */
 static int cgi_output_collect(pid_t pid, int outfd, char **out,
@@ -946,7 +1111,7 @@ static int cgi_output_collect(pid_t pid, int outfd, char **out,
     }
 
     while (1) { /* EOF 뒤: 끝날 때까지 마감 안에서 기다림 */
-        pid_t w = waitpid(pid, &wstatus, WNOHANG);
+        pid_t w = cgi_reap(pid, &wstatus, WNOHANG);
         if (w == pid) {
             break;
         }
@@ -967,8 +1132,8 @@ static int cgi_output_collect(pid_t pid, int outfd, char **out,
     goto done;
 
 kill_child:
-    kill(pid, SIGKILL);
-    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+    kill(-pid, SIGKILL);
+    while (cgi_reap(pid, NULL, 0) < 0 && errno == EINTR) {
     }
 
 done:
@@ -1087,7 +1252,8 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
 /*
  * CGI 실행 (final.md 4.3)
  *   fork 전(부모): envp, 입력 fd, 출력 파이프 준비
- *   자식: dup2(입력 → stdin, 파이프 → stdout) → fd 3 이상 close → execve
+ *   자식: 프로세스 그룹과 시그널 설정 → dup2(입력 → stdin, 파이프 → stdout)
+ *         → fd 3 이상 close → execve
  *         (멀티스레드 fork 뒤라 setenv, malloc을 쓰지 않음)
  *   부모: 출력을 모아(1 MiB, 10초) 응답 생성. 실패 500, 시간 초과 504
  */
@@ -1143,7 +1309,7 @@ static int cgi_serve(int fd, const struct http_request *req,
     fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
 
     /* 3. fork */
-    pid = fork();
+    pid = cgi_fork();
     if (pid < 0) {
         close(infd);
         close(pipefd[0]);
@@ -1151,6 +1317,12 @@ static int cgi_serve(int fd, const struct http_request *req,
         return error_reply(fd, req, 500, filename, "CGI fork failed", next);
     }
     if (pid == 0) { /* 자식: async-signal-safe 함수만 */
+        sigset_t none;
+
+        /* 시그널 차단과 무시는 execve 뒤에도 남으므로 기본으로 되돌림 */
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+        signal(SIGPIPE, SIG_DFL);
         if (dup2(infd, STDIN_FILENO) < 0 ||
             dup2(pipefd[1], STDOUT_FILENO) < 0) {
             _exit(127);
