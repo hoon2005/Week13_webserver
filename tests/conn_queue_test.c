@@ -127,8 +127,22 @@ static void test_concurrent_each_value_once(void)
     free(s);
 }
 
+static void test_has_waiting(void)
+{
+    struct conn_queue q;
+
+    TEST_CHECK(conn_queue_init(&q, 2) == 0);
+    TEST_CHECK(!conn_queue_has_waiting(&q));
+    conn_queue_push(&q, 1);
+    TEST_CHECK(conn_queue_has_waiting(&q));
+    conn_queue_pop(&q);
+    TEST_CHECK(!conn_queue_has_waiting(&q));
+    conn_queue_destroy(&q);
+}
+
 TEST_LIST = {{"fifo_and_wraparound", test_fifo_and_wraparound},
              {"init_rejects_zero_capacity", test_init_rejects_zero_capacity},
              {"shutdown_drains_then_stops", test_shutdown_drains_then_stops},
+             {"큐에 기다리는 연결이 있는지 알려 준다", test_has_waiting},
              {"concurrent_each_value_once", test_concurrent_each_value_once},
              {NULL, NULL}};

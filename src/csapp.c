@@ -24,6 +24,9 @@
 /* $begin csapp.c */
 #include "csapp.h"
 
+#include <poll.h>
+#include <time.h>
+
 /************************** 
  * Error-handling functions
  **************************/
@@ -804,12 +807,40 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
  *    entry, rio_read() refills the internal buffer via a call to
  *    read() if the internal buffer is empty.
  */
+/*
+ * rio_wait - rio_deadline과 rio_idle_ms 중 먼저 오는 때까지 읽을 것을 기다림.
+ *    SO_RCVTIMEO는 read 한 번 기준이라, 한 글자씩 계속 보내면 끝나지 않음.
+ *    rio_readlineb는 한 줄이 끝날 때까지 돌아오지 않으므로 여기서 잼.
+ *    읽을 수 있으면 0, 시간이 지났으면 -1 (errno는 EAGAIN)
+ */
+static int rio_wait(rio_t *rp)
+{
+    struct timespec now;
+    struct pollfd pfd = {rp->rio_fd, POLLIN, 0};
+    long left;
+    int r;
+
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        left = rp->rio_deadline -
+               ((long)now.tv_sec * 1000 + now.tv_nsec / 1000000);
+        if (left > rp->rio_idle_ms)
+            left = rp->rio_idle_ms;
+        r = left > 0 ? poll(&pfd, 1, (int)left) : 0;
+    } while (r < 0 && errno == EINTR);
+    if (r == 0)
+        errno = EAGAIN;
+    return r > 0 ? 0 : -1;
+}
+
 /* $begin rio_read */
 static ssize_t rio_read(rio_t *rp, char *usrbuf, size_t n)
 {
     int cnt;
 
     while (rp->rio_cnt <= 0) {  /* Refill if buf is empty */
+	if (rp->rio_deadline != 0 && rio_wait(rp) < 0)
+	    return -1;
 	rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, 
 			   sizeof(rp->rio_buf));
 	if (rp->rio_cnt < 0) {
@@ -842,6 +873,8 @@ void rio_readinitb(rio_t *rp, int fd)
     rp->rio_fd = fd;  
     rp->rio_cnt = 0;  
     rp->rio_bufptr = rp->rio_buf;
+    rp->rio_deadline = 0;
+    rp->rio_idle_ms = 0;
 }
 /* $end rio_readinitb */
 

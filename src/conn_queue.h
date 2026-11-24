@@ -14,6 +14,7 @@ struct conn_queue {
     int head;     /* 다음에 꺼낼 칸 */
     int tail;     /* 다음에 넣을 칸 */
     int count;    /* 지금 들어 있는 개수 */
+    int idle;     /* 꺼낼 것을 기다리는 작업자 수 */
     int shutdown; /* 1이면 더 기다리지 않음 (M7 종료 처리용) */
     pthread_mutex_t lock;
     pthread_cond_t not_empty; /* 꺼낼 것이 생겼다는 신호 (작업자가 기다림) */
@@ -22,6 +23,10 @@ struct conn_queue {
 
 /* 큐를 만듭니다. 성공하면 0, 실패하면 -1 */
 int conn_queue_init(struct conn_queue *q, int capacity);
+
+/* 큐에 있는 연결이 쉬는 작업자보다 많으면 1. 방금 넣어 곧 꺼내 갈 연결은
+ * 기다리는 것으로 보지 않습니다 */
+int conn_queue_has_waiting(struct conn_queue *q);
 
 /* 큐가 쓰던 메모리와 동기화 객체를 정리합니다. 기다리는 스레드가 없을 때 부릅니다 */
 void conn_queue_destroy(struct conn_queue *q);

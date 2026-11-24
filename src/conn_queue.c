@@ -23,6 +23,7 @@ int conn_queue_init(struct conn_queue *q, int capacity)
     q->head = 0;
     q->tail = 0;
     q->count = 0;
+    q->idle = 0;
     q->shutdown = 0;
     if (pthread_mutex_init(&q->lock, NULL) != 0) {
         free(q->items);
@@ -75,9 +76,11 @@ int conn_queue_pop(struct conn_queue *q)
     int connfd;
 
     pthread_mutex_lock(&q->lock);
+    q->idle++;
     while (q->count == 0 && !q->shutdown) {
         pthread_cond_wait(&q->not_empty, &q->lock);
     }
+    q->idle--;
     if (q->count == 0) { /* shutdown이고 남은 것도 없음 */
         pthread_mutex_unlock(&q->lock);
         return -1;
@@ -88,6 +91,16 @@ int conn_queue_pop(struct conn_queue *q)
     pthread_cond_signal(&q->not_full); /* 기다리던 main을 깨움 */
     pthread_mutex_unlock(&q->lock);
     return connfd;
+}
+
+int conn_queue_has_waiting(struct conn_queue *q)
+{
+    int waiting;
+
+    pthread_mutex_lock(&q->lock);
+    waiting = q->count > q->idle;
+    pthread_mutex_unlock(&q->lock);
+    return waiting;
 }
 
 void conn_queue_shutdown(struct conn_queue *q)

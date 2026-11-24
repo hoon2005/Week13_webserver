@@ -70,6 +70,9 @@ static struct server_config cfg = {
 /* --proxy로 받은 라우팅 규칙. 작업자를 만든 뒤에는 순번만 바뀜 */
 static struct route_table routes;
 
+/* main이 넣고 작업자가 꺼내는 작업 큐. 응답할 때도 기다리는 손님이 있는지 봄 */
+static struct conn_queue queue;
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -146,7 +149,6 @@ static void connection_reset_set(int connfd);
 
 int main(int argc, char **argv)
 {
-    struct conn_queue queue;
     pthread_t *workers;
     const char *path;
     int listenfd;
@@ -192,7 +194,7 @@ int main(int argc, char **argv)
         exit(1);
     }
     for (int i = 0; i < cfg.threads; i++) {
-        int rc = pthread_create(&workers[i], NULL, worker_main, &queue);
+        int rc = pthread_create(&workers[i], NULL, worker_main, NULL);
         if (rc != 0) {
             fprintf(stderr, "pthread_create: %s\n", strerror(rc));
             exit(1);
@@ -225,10 +227,10 @@ int main(int argc, char **argv)
  * 락은 큐를 만질 때만 잡고, 요청 처리는 락 밖에서 함 */
 static void *worker_main(void *arg)
 {
-    struct conn_queue *queue = arg;
     int connfd;
 
-    while ((connfd = conn_queue_pop(queue)) >= 0) {
+    (void)arg;
+    while ((connfd = conn_queue_pop(&queue)) >= 0) {
         enum conn_next next = serve_connection(connfd);
         if (next == CONN_CLOSE_REPLIED) {
             connection_close_lingering(connfd);
@@ -326,6 +328,18 @@ static void socket_options_set(int connfd)
 
 /* ============================== 응답 쓰기 ============================== */
 
+/*
+ * 응답 헤더를 쓰기 직전에 부릅니다. 큐에서 기다리는 손님이 있으면 keep-alive를
+ * 포기합니다. 작업자보다 많은 손님이 왔을 때, 먼저 온 연결들이 쉬지 않고 요청하면
+ * 나중에 온 손님이 요청 수 상한(100건)까지 기다리게 되기 때문입니다.
+ */
+static void conn_next_yield(enum conn_next *next)
+{
+    if (*next == CONN_KEEP && conn_queue_has_waiting(&queue)) {
+        *next = CONN_CLOSE_REPLIED;
+    }
+}
+
 static int write_all(int fd, const void *buf, size_t n)
 {
     return rio_writen(fd, (void *)buf, n) == (ssize_t)n ? 0 : -1;
@@ -340,13 +354,14 @@ static int write_all(int fd, const void *buf, size_t n)
  */
 static int response_head_send(int fd, int status, const char *reason,
                               const char *content_type, const char *extra,
-                              long length, enum conn_next next)
+                              long length, enum conn_next *next)
 {
     char header[MAXBUF * 2];
     char type_line[HTTP_FIELD_MAX + 32] = "";
     char length_line[48] = "";
     int n;
 
+    conn_next_yield(next);
     if (length >= 0) {
         snprintf(length_line, sizeof(length_line), "Content-Length: %ld\r\n",
                  length);
@@ -363,7 +378,7 @@ static int response_head_send(int fd, int status, const char *reason,
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
                  extra ? extra : "", length_line,
-                 next == CONN_KEEP ? "keep-alive" : "close");
+                 *next == CONN_KEEP ? "keep-alive" : "close");
     if (n < 0 || n >= (int)sizeof(header)) {
         return -1;
     }
@@ -393,7 +408,7 @@ static int error_reply(int fd, const struct http_request *req, int status,
         body_len = sizeof(body) - 1;
     }
     if (response_head_send(fd, status, NULL, "text/html", NULL, body_len,
-                           *next) < 0 ||
+                           next) < 0 ||
         (send_body && write_all(fd, body, (size_t)body_len) < 0)) {
         *next = CONN_CLOSE_NOW;
     }
@@ -413,6 +428,7 @@ static void request_log(const struct http_request *req, int status,
 /* ============================== M5: 연결과 요청 처리 ============================== */
 
 static long now_ms(void);
+static int request_wait(int fd, rio_t *rio);
 static enum conn_next request_handle(int fd, rio_t *rio, int can_keep);
 static int request_route(int fd, struct http_request *req, enum conn_next *next,
                          char *note, size_t note_size);
@@ -429,10 +445,38 @@ static enum conn_next serve_connection(int connfd)
     enum conn_next next = CONN_KEEP;
 
     rio_readinitb(&rio, connfd);
+    rio.rio_idle_ms = cfg.timeout * 1000;
     for (int n = 1; next == CONN_KEEP; n++) {
+        if (!request_wait(connfd, &rio)) {
+            return CONN_CLOSE_NOW;
+        }
         next = request_handle(connfd, &rio, n < cfg.keepalive_max);
     }
     return next;
+}
+
+/*
+ * 다음 요청의 첫 바이트를 기다립니다. 왔으면 1, --timeout 안에 안 오면 0.
+ * 파이프라이닝한 다음 요청은 이미 rio 버퍼에 있고 소켓은 비어 있을 수 있으므로
+ * 버퍼를 먼저 봅니다. 끊긴 연결도 1이고, 이어지는 읽기가 끊긴 것을 알아냅니다.
+ */
+static int request_wait(int fd, rio_t *rio)
+{
+    long deadline = now_ms() + cfg.timeout * 1000L;
+
+    if (rio->rio_cnt > 0) {
+        return 1;
+    }
+    while (1) {
+        struct pollfd p = {fd, POLLIN, 0};
+        long left = deadline - now_ms();
+        int r = left > 0 ? poll(&p, 1, (int)left) : 0;
+
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        return r > 0;
+    }
 }
 
 /*
@@ -496,6 +540,10 @@ static void connection_reset_set(int connfd)
 /*
  * 요청 하나를 읽고 응답합니다. 반환은 enum conn_next.
  * 한 줄 규칙: 요청을 끝까지 읽었고 응답 길이를 알면 유지, 아니면 닫음 (5.2)
+ *
+ * 첫 바이트가 온 뒤 헤더 전체는 --timeout의 2배, 본문 전체는 6배 안에 받아야
+ * 합니다(기본 10초, 30초). 그 안에서도 --timeout 동안 아무것도 안 오면 끝냅니다.
+ * 시간이 지나면 rio 함수가 -1을 돌려주므로 응답 없이 닫습니다.
  */
 static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
 {
@@ -508,6 +556,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
     enum conn_next next = CONN_CLOSE_REPLIED;
 
     http_request_init(&req);
+    rio->rio_deadline = now_ms() + cfg.timeout * 2000L;
 
     /* 1. 요청 줄. 0(클라이언트가 끊음)이나 -1(읽기 타임아웃)이면 조용히 닫음 */
     n = rio_readlineb(rio, line, MAXLINE);
@@ -564,6 +613,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
             request_log(&req, 500, "");
             return next;
         }
+        rio->rio_deadline = now_ms() + cfg.timeout * 6000L;
         n = rio_readnb(rio, req.body, (size_t)body_len);
         if (n != (ssize_t)body_len) { /* 도중에 끊김, 타임아웃: 응답 없이 닫음 */
             http_request_free(&req);
@@ -752,7 +802,7 @@ static int static_serve(int fd, const struct http_request *req,
     close(srcfd);
 
     if (response_head_send(fd, 200, NULL, http_mime_type(filename), NULL,
-                           (long)filesize, *next) < 0 ||
+                           (long)filesize, next) < 0 ||
         (srcp != NULL && write_all(fd, srcp, (size_t)filesize) < 0)) {
         *next = CONN_CLOSE_NOW; /* 응답을 보내다 실패하면 바로 닫음 */
     }
@@ -1026,7 +1076,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
     }
     if (response_head_send(fd, status, reason, NULL, extra,
                            (status == 204 || status == 304) ? -1 : body_len,
-                           *next) < 0 ||
+                           next) < 0 ||
         (body_len > 0 &&
          write_all(fd, out + body_start, (size_t)body_len) < 0)) {
         *next = CONN_CLOSE_NOW;
@@ -1153,6 +1203,7 @@ static int proxy_serve(int fd, const struct http_request *req,
                            next);
     }
     status = p.resp.status;
+    conn_next_yield(next);
     keep = *next == CONN_KEEP;
 
     switch (proxy_relay(&p, fd, &keep)) {

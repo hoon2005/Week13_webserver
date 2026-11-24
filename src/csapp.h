@@ -48,6 +48,8 @@ typedef struct {
     int rio_cnt;               /* Unread bytes in internal buf */
     char *rio_bufptr;          /* Next unread byte in internal buf */
     char rio_buf[RIO_BUFSIZE]; /* Internal buffer */
+    long rio_deadline;         /* 이 시각(ms)까지만 읽음. 0이면 제한 없음 */
+    int rio_idle_ms;           /* 마감이 있을 때, 읽기 한 번에 기다릴 시간(ms) */
 } rio_t;
 /* $end rio_t */
 
