@@ -4,16 +4,18 @@
  *   Phase 2: docs/prd/final.md의 M4 동시성, M5 HTTP 완성
  *     M4 스레드 풀(작업 큐는 src/conn_queue.c), 소켓 타임아웃, fd 상속 차단
  *     M5 요청 파서(src/http.c), 본문, Expect, CGI 구조 변경, keep-alive
+ *     M6 Reverse Proxy (규칙은 src/route.c, 중계는 src/proxy.c)
  *
  * 사용법:
  *   ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
+ *                       [--proxy /접두사/=백엔드,백엔드]... [--proxy-timeout 초]
  *
  * 요청 하나의 흐름 (final.md 7장)
  *   [main]   accept → FD_CLOEXEC, 타임아웃 설정 → 작업 큐에 넣기
  *   [작업자] 큐에서 꺼내기 → rio 준비(연결당 한 번) → 요청 반복 처리 → close
  *   요청 하나: 요청 줄 → 헤더 → 헤더 검사 → (Expect) → 본문 → 경로 확인
- *             → 정적 파일 / CGI → 응답 → keep-alive 판단
+ *             → 백엔드 / 정적 파일 / CGI → 응답 → keep-alive 판단
  */
 #if defined(__linux__)
 /* syscall(SYS_close_range)용. _GNU_SOURCE는 csapp.h의 gai_error와 충돌해서 쓰지 않음 */
@@ -23,6 +25,8 @@
 #include "csapp.h"
 #include "conn_queue.h"
 #include "http.h"
+#include "proxy.h"
+#include "route.h"
 
 #include <ctype.h>
 #include <netinet/tcp.h>
@@ -48,6 +52,7 @@ struct server_config {
     int queue;         /* 작업 큐 크기 */
     int timeout;       /* 읽기 타임아웃(초). 쓰기는 2배 */
     int keepalive_max; /* 연결당 요청 수 상한 */
+    int proxy_timeout; /* 백엔드 시간 제한(초) */
     long open_max;     /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
     char path_env[1024]; /* CGI에 넘길 PATH=... */
 };
@@ -59,13 +64,18 @@ static struct server_config cfg = {
     .queue = 64,
     .timeout = 5,
     .keepalive_max = 100,
+    .proxy_timeout = 10,
 };
+
+/* --proxy로 받은 라우팅 규칙. 작업자를 만든 뒤에는 순번만 바뀜 */
+static struct route_table routes;
 
 static void usage(const char *prog)
 {
     fprintf(stderr,
             "usage: %s <port> [--root DIR] [--threads N] [--queue N] "
-            "[--timeout 초] [--keepalive-max N]\n",
+            "[--timeout 초] [--keepalive-max N] "
+            "[--proxy /접두사/=이름:포트,이름:포트]... [--proxy-timeout 초]\n",
             prog);
     exit(1);
 }
@@ -102,6 +112,14 @@ static void config_parse(int argc, char **argv)
             cfg.timeout = positive_int_arg(argv[0], argv[i + 1]);
         } else if (strcmp(argv[i], "--keepalive-max") == 0) {
             cfg.keepalive_max = positive_int_arg(argv[0], argv[i + 1]);
+        } else if (strcmp(argv[i], "--proxy-timeout") == 0) {
+            cfg.proxy_timeout = positive_int_arg(argv[0], argv[i + 1]);
+        } else if (strcmp(argv[i], "--proxy") == 0) {
+            const char *error = route_table_add(&routes, argv[i + 1]);
+            if (error != NULL) {
+                fprintf(stderr, "--proxy %s: %s\n", argv[i + 1], error);
+                exit(1);
+            }
         } else {
             usage(argv[0]);
         }
@@ -114,7 +132,8 @@ static void config_parse(int argc, char **argv)
 enum conn_next {
     CONN_KEEP,          /* 다음 요청을 기다림 */
     CONN_CLOSE_REPLIED, /* 응답을 다 보냄 → 남은 데이터를 비우고 닫음 */
-    CONN_CLOSE_NOW      /* 응답 없이, 또는 보내다 실패해서 바로 닫음 */
+    CONN_CLOSE_NOW,     /* 응답 없이, 또는 보내다 실패해서 바로 닫음 */
+    CONN_RESET          /* 길이 없는 응답이 잘림 → RST로 끊어 알림 */
 };
 
 static int listen_socket_open(const char *port);
@@ -123,6 +142,7 @@ static void socket_options_set(int connfd);
 static void *worker_main(void *arg);
 static enum conn_next serve_connection(int connfd);
 static void connection_close_lingering(int connfd);
+static void connection_reset_set(int connfd);
 
 int main(int argc, char **argv)
 {
@@ -209,8 +229,11 @@ static void *worker_main(void *arg)
     int connfd;
 
     while ((connfd = conn_queue_pop(queue)) >= 0) {
-        if (serve_connection(connfd) == CONN_CLOSE_REPLIED) {
+        enum conn_next next = serve_connection(connfd);
+        if (next == CONN_CLOSE_REPLIED) {
             connection_close_lingering(connfd);
+        } else if (next == CONN_RESET) {
+            connection_reset_set(connfd);
         }
         close(connfd);
     }
@@ -377,19 +400,22 @@ static int error_reply(int fd, const struct http_request *req, int status,
     return status;
 }
 
-/* 요청마다 한 줄 로그. printf 한 번이라 스레드끼리 한 줄 안에서는 섞이지 않음 */
-static void request_log(const struct http_request *req, int status)
+/* 요청마다 한 줄 로그. printf 한 번이라 스레드끼리 한 줄 안에서는 섞이지 않음.
+ * note: 뒤에 붙일 글 (백엔드 이름 등, 없으면 "") */
+static void request_log(const struct http_request *req, int status,
+                        const char *note)
 {
-    printf("%s %s %s %d\n", req->method[0] ? req->method : "-",
-           req->uri[0] ? req->uri : "-",
-           req->version[0] ? req->version : "-", status);
+    printf("%s %s %s %d%s\n", req->method[0] ? req->method : "-",
+           req->uri[0] ? req->uri : "-", req->version[0] ? req->version : "-",
+           status, note);
 }
 
 /* ============================== M5: 연결과 요청 처리 ============================== */
 
 static long now_ms(void);
 static enum conn_next request_handle(int fd, rio_t *rio, int can_keep);
-static int request_route(int fd, struct http_request *req, enum conn_next *next);
+static int request_route(int fd, struct http_request *req, enum conn_next *next,
+                         char *note, size_t note_size);
 
 /*
  * 연결 하나를 처리합니다 (final.md 5.1).
@@ -456,6 +482,18 @@ static void connection_close_lingering(int connfd)
 }
 
 /*
+ * 다음 close가 FIN 대신 RST를 보내게 합니다. Content-Length가 없는 응답은 FIN이
+ * 곧 "끝"이라, 잘린 응답을 그냥 닫으면 손님이 완성된 응답으로 받습니다.
+ * shutdown(SHUT_WR)을 먼저 부르면 FIN이 나가 버리므로 비우기와 함께 쓰지 않음.
+ */
+static void connection_reset_set(int connfd)
+{
+    struct linger linger = {1, 0};
+
+    setsockopt(connfd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger));
+}
+
+/*
  * 요청 하나를 읽고 응답합니다. 반환은 enum conn_next.
  * 한 줄 규칙: 요청을 끝까지 읽었고 응답 길이를 알면 유지, 아니면 닫음 (5.2)
  */
@@ -463,6 +501,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
 {
     struct http_request req;
     char line[MAXLINE];
+    char note[BACKEND_NAME_MAX + 32] = "";
     ssize_t n;
     long body_len;
     int status;
@@ -479,7 +518,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
     if (status != 0) { /* 414, 400, 505, 501: 본문 경계를 모르므로 닫음 */
         error_reply(fd, &req, status, "request line", "Bad request line",
                     &next);
-        request_log(&req, status);
+        request_log(&req, status, "");
         return next;
     }
 
@@ -495,7 +534,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
         }
         if (status != 0) {
             error_reply(fd, &req, status, "header", "Bad header", &next);
-            request_log(&req, status);
+            request_log(&req, status, "");
             return next;
         }
     }
@@ -504,7 +543,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
     status = http_finish_headers(&req);
     if (status != 0) {
         error_reply(fd, &req, status, req.uri, "Request rejected", &next);
-        request_log(&req, status);
+        request_log(&req, status, "");
         return next;
     }
     body_len = http_body_length(&req);
@@ -522,7 +561,7 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
         req.body = malloc((size_t)body_len);
         if (req.body == NULL) {
             error_reply(fd, &req, 500, req.uri, "Out of memory", &next);
-            request_log(&req, 500);
+            request_log(&req, 500, "");
             return next;
         }
         n = rio_readnb(rio, req.body, (size_t)body_len);
@@ -537,8 +576,8 @@ static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
     if (req.keep_alive && can_keep) {
         next = CONN_KEEP;
     }
-    status = request_route(fd, &req, &next);
-    request_log(&req, status);
+    status = request_route(fd, &req, &next, note, sizeof(note));
+    request_log(&req, status, note);
     http_request_free(&req);
     return next;
 }
@@ -553,21 +592,39 @@ enum uri_target {
     URI_TOO_LONG   /* 파일 경로가 버퍼보다 김 → 414 */
 };
 
-static int path_is_allowed(const char *path, size_t len);
+static int path_is_allowed(const char *path, size_t len, int is_local);
 static enum uri_target uri_parse(const char *uri, char *filename,
                                  char *cgiargs);
 static int static_serve(int fd, const struct http_request *req,
                         const char *filename, off_t filesize, enum conn_next *next);
 static int cgi_serve(int fd, const struct http_request *req,
                      const char *filename, const char *cgiargs, enum conn_next *next);
+static int proxy_serve(int fd, const struct http_request *req,
+                       struct route *route, enum conn_next *next, char *note,
+                       size_t note_size);
 
-/* 요청을 정적 파일 / CGI로 보냄. 보낸 상태 코드를 돌려줌 */
-static int request_route(int fd, struct http_request *req, enum conn_next *next)
+/* 요청을 백엔드 / 정적 파일 / CGI로 보냄. 보낸 상태 코드를 돌려줌 */
+static int request_route(int fd, struct http_request *req, enum conn_next *next,
+                         char *note, size_t note_size)
 {
     char filename[MAXLINE], cgiargs[MAXLINE];
+    size_t path_len = strcspn(req->uri, "?");
     struct stat sbuf;
-    enum uri_target target = uri_parse(req->uri, filename, cgiargs);
+    struct route *route;
+    enum uri_target target;
 
+    /* ".."은 어디로 가는 요청이든 403. 규칙의 접두사를 벗어나는 것을 막음 */
+    if (!path_is_allowed(req->uri, path_len, 0)) {
+        return error_reply(fd, req, 403, req->uri,
+                           "Tiny doesn't serve this path", next);
+    }
+    /* 라우팅 규칙에 걸리면 백엔드로, 아니면 아래에서 직접 처리 */
+    route = route_table_find(&routes, req->uri, path_len);
+    if (route != NULL) {
+        return proxy_serve(fd, req, route, next, note, note_size);
+    }
+
+    target = uri_parse(req->uri, filename, cgiargs);
     if (target == URI_FORBIDDEN) {
         return error_reply(fd, req, 403, req->uri,
                            "Tiny doesn't serve this path", next);
@@ -605,14 +662,14 @@ static int request_route(int fd, struct http_request *req, enum conn_next *next)
 }
 
 /*
- * 경로(쿼리 제외)를 '/'로 나눈 조각을 검사합니다. 로컬 파일로 찾을 때만 씁니다.
- *   "..": 루트 밖으로 나감
- *   "."과 중간의 빈 조각("//"): "/./cgi-bin/x"처럼 첫 조각이 cgi-bin이 아닌 척
- *     하면 CGI 프로그램 파일이 정적 파일로 내려감
+ * 경로(쿼리 제외)를 '/'로 나눈 조각을 검사합니다.
+ *   "..": 루트 밖으로 나가거나 라우팅 접두사를 벗어남
+ *   is_local이면 "."과 중간의 빈 조각("//")도 거절: "/./cgi-bin/x"처럼 첫 조각이
+ *     cgi-bin이 아닌 척하면 CGI 프로그램 파일이 정적 파일로 내려감
  *   끝의 '/'는 허용 (기본 파일 home.html)
  * URL 표기만 봅니다. 루트 안의 심볼릭 링크가 어디를 가리키는지는 보지 않습니다.
  */
-static int path_is_allowed(const char *path, size_t len)
+static int path_is_allowed(const char *path, size_t len, int is_local)
 {
     size_t start = 1; /* path[0]은 '/' */
 
@@ -621,8 +678,11 @@ static int path_is_allowed(const char *path, size_t len)
             continue;
         }
         size_t seg = i - start;
-        if ((seg == 0 && i < len) || (seg == 1 && path[start] == '.') ||
-            (seg == 2 && path[start] == '.' && path[start + 1] == '.')) {
+        if (seg == 2 && path[start] == '.' && path[start + 1] == '.') {
+            return 0;
+        }
+        if (is_local &&
+            ((seg == 0 && i < len) || (seg == 1 && path[start] == '.'))) {
             return 0;
         }
         start = i + 1;
@@ -646,7 +706,7 @@ static enum uri_target uri_parse(const char *uri, char *filename,
     int n;
 
     cgiargs[0] = '\0';
-    if (!path_is_allowed(uri, path_len)) {
+    if (!path_is_allowed(uri, path_len, 1)) {
         return URI_FORBIDDEN;
     }
     if (first_len == 7 && strncasecmp(uri + 1, "cgi-bin", 7) == 0) {
@@ -1066,5 +1126,49 @@ static int cgi_serve(int fd, const struct http_request *req,
     }
     status = cgi_reply(fd, req, out, out_len, next);
     free(out);
+    return status;
+}
+
+/* ============================== M6: Reverse Proxy ============================== */
+
+/*
+ * 규칙에 걸린 요청을 백엔드로 보내고 응답을 전달합니다.
+ *   응답을 쓰기 전의 실패(proxy_open)는 502, 504 오류 페이지로 답할 수 있고,
+ *   쓰기 시작한 뒤의 실패(proxy_relay)는 연결을 닫는 수밖에 없음.
+ */
+static int proxy_serve(int fd, const struct http_request *req,
+                       struct route *route, enum conn_next *next, char *note,
+                       size_t note_size)
+{
+    struct proxy p;
+    const char *cut = "";
+    int status, keep;
+
+    status = proxy_open(&p, req, route->backends, route->backend_count,
+                        route_next_backend(route), cfg.proxy_timeout);
+    if (status != 0) {
+        snprintf(note, note_size, " -> %s", p.backend->name);
+        return error_reply(fd, req, status, req->uri,
+                           "Tiny couldn't get a response from the backend",
+                           next);
+    }
+    status = p.resp.status;
+    keep = *next == CONN_KEEP;
+
+    switch (proxy_relay(&p, fd, &keep)) {
+    case PROXY_DONE:
+        *next = keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        break;
+    case PROXY_ABORTED:
+        *next = CONN_CLOSE_NOW;
+        cut = " (중단)";
+        break;
+    case PROXY_ABORTED_UNKNOWN_LENGTH:
+        *next = CONN_RESET;
+        cut = " (중단)";
+        break;
+    }
+    snprintf(note, note_size, " -> %s%s", p.backend->name, cut);
+    proxy_close(&p);
     return status;
 }

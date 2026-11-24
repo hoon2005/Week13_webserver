@@ -537,6 +537,8 @@ const char *http_status_text(int status)
         return "Internal Server Error";
     case 501:
         return "Not Implemented";
+    case 502:
+        return "Bad Gateway";
     case 503:
         return "Service Unavailable";
     case 504:
