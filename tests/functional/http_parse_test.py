@@ -7,8 +7,9 @@ baseline_test.py처럼 임시 폴더에 tests/fixtures/www/와 build/adder를 �
 넘긴다는 것입니다. 그래서 --root가 동작해야 모든 테스트가 통과합니다.
 
 http.client는 잘못된 요청을 보내지 못하므로 소켓에 요청 바이트를 그대로 씁니다.
-이 단계(M5-1)에서는 모든 응답 뒤에 서버가 연결을 닫으므로, 닫힐 때까지 읽으면
-응답 하나 전체입니다. 엣지 케이스 ID는 docs/plan/phase2-edge-cases-http.md 기준입니다.
+닫힐 때까지 읽어 응답 하나를 받으므로, M5-4a부터 연결을 유지할 수 있는 요청
+(HTTP/1.1 정적 GET)에는 "Connection: close"를 붙여 서버가 응답 뒤 닫게 합니다.
+keep-alive 자체는 keepalive_test.py에서 확인합니다. 엣지 케이스 ID는 docs/plan/phase2-edge-cases-http.md 기준입니다.
 """
 
 import os
@@ -108,7 +109,8 @@ class HttpParseTest(unittest.TestCase):
 
     def get(self, path, method="GET", extra=b""):
         return self.send_raw(
-            method.encode() + b" " + path.encode() + b" HTTP/1.1\r\nHost: x\r\n" + extra + b"\r\n"
+            method.encode() + b" " + path.encode()
+            + b" HTTP/1.1\r\nHost: x\r\nConnection: close\r\n" + extra + b"\r\n"
         )
 
     def assert_framed(self, resp):
@@ -132,11 +134,11 @@ class HttpParseTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
 
     def test_leading_blank_line_skipped(self):  # E-R9
-        resp = self.send_raw(b"\r\nGET /home.html HTTP/1.1\r\nHost: x\r\n\r\n")
+        resp = self.send_raw(b"\r\nGET /home.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         self.assertEqual(resp.status, 200)
 
     def test_lf_only_line_endings(self):  # E-R10
-        resp = self.send_raw(b"GET /home.html HTTP/1.1\nHost: x\n\n")
+        resp = self.send_raw(b"GET /home.html HTTP/1.1\nHost: x\nConnection: close\n\n")
         self.assertEqual(resp.status, 200)
 
     def test_cgi_get_still_works(self):

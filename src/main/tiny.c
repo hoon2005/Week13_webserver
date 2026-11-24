@@ -3,7 +3,7 @@
  *   CS:APP 11.6절 Tiny와 같은 일을 합니다. Phase 1 계획(M1~M3)에 따라
  *   Tiny의 각 부분을 같은 동작의 우리 코드로 바꿔 끼웠습니다.
  *     M1 소켓 연결: listen_socket_open, main의 accept 반복문
- *     M2 정적 GET:  doit과 단계 함수들, static_file_serve, http_error_send
+ *     M2 정적 GET:  handle_request(옛 doit)와 단계 함수들, static_file_serve, http_error_send
  *     M3 CGI GET:   cgi_serve ([M5-3] 실행과 출력 해석은 cgi.c로 옮김)
  *   리뷰에서 나온 안정성 수정 5가지도 반영했습니다. 클라이언트 한 명의 문제
  *   (연결 중단, 깨진 요청, 빈 파일, fork 실패)로 서버 전체가 꺼지지 않고
@@ -21,6 +21,8 @@
  *   Expect: 100-continue에 답함). CGI POST는 본문을 임시 파일에 담아 stdin으로 넘깁니다.
  *   Phase 2 M5-3: CGI 출력을 파이프로 모은 뒤 서버가 응답을 만듭니다(cgi.c).
  *   CGI가 실패하면 500, 10초 안에 안 끝나면 504, Content-Length는 서버가 셉니다.
+ *   Phase 2 M5-4a: 연결 하나에서 요청을 여러 개 처리합니다(keep-alive, serve_connection).
+ *   1단계라 본문 없는 정적 GET의 200만 연결을 유지하고, 나머지는 응답 뒤 닫습니다.
  *   사용법: ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
  */
@@ -39,7 +41,7 @@ static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 op
 
 /* M4-2: 스레드 풀과 실행 인자 */
 static void args_parse(int argc, char **argv);  /* 실행 인자 → cfg */
-static void *worker_main(void *arg);            /* 작업자: 큐에서 꺼내 doit → close 반복 */
+static void *worker_main(void *arg);            /* 작업자: 큐에서 꺼내 serve_connection → close 반복 */
 
 /* M4-3: 소켓 설정 */
 static int conn_accept(int listenfd);           /* accept + FD_CLOEXEC (OS별 분기) */
@@ -47,7 +49,8 @@ static int fd_cloexec_set(int fd);              /* fd에 FD_CLOEXEC 켜기 */
 static int conn_timeouts_set(int connfd);       /* SO_RCVTIMEO, SO_SNDTIMEO 걸기 */
 
 /* M2: 요청 처리 ([M5-1] 단계 함수는 응답을 직접 보내지 않고 상태 코드를 돌려줌) */
-void doit(int fd);
+static void serve_connection(int fd); /* [M5-4a] 연결 하나: 요청 반복 처리 */
+static int handle_request(int fd, rio_t *rp, int can_keep); /* 옛 doit: 요청 하나 */
 static int request_read(rio_t *rp, struct http_request *req); /* [M5-1] 요청 줄 + 헤더 */
 static void conn_linger(int fd); /* [M5-1] 읽지 않은 요청 바이트를 비우고 닫을 준비 */
 static int uri_check(const char *uri);                    /* 새로 만듦: ../ 차단 */
@@ -59,7 +62,7 @@ static int file_check_executable(const struct stat *sbuf); /* doit에서 분리 
 
 /* M2: 정적 응답, 오류 응답 */
 static int static_file_serve(int fd, const char *filename, int filesize,
-                             int head); /* serve_static 대신 */
+                             int head, int keep); /* serve_static 대신 */
 static void http_error_send(int fd, int head, int status, const char *cause,
                             const char *longmsg); /* clienterror 대신 */
 
@@ -204,7 +207,7 @@ static void *worker_main(void *arg)
     (void)arg; /* 넘겨받는 값 없음 */
     while ((connfd = conn_queue_pop(&conn_q)) != -1) {
         /* 락은 pop 안에서만 잡고 풀림: 요청 처리는 락 밖이라 작업자끼리 동시에 진행 */
-        doit(connfd);  /* 요청 하나 처리 (Phase 1 코드 그대로) */
+        serve_connection(connfd); /* [M5-4a] 이 연결의 요청을 끝날 때까지 처리 */
         close(connfd); /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
     }
     return NULL;
@@ -446,6 +449,38 @@ static const char *request_error_msg(int status)
     }
 }
 
+/* [M5-4a] handle_request가 serve_connection에 돌려주는 값 */
+#define CONN_KEEP 1  /* 연결 유지: 같은 연결에서 다음 요청을 읽음 */
+#define CONN_CLOSE 0 /* 응답 뒤 닫음: 남은 바이트를 비우고 닫음 (conn_linger) */
+#define CONN_DEAD -1 /* 이미 끊겼거나 타임아웃: 바로 닫음 */
+
+/*
+ * [M5-4a] 연결 하나를 맡아 요청을 반복 처리합니다 (final.md 5.1).
+ * rio(읽기 버퍼)는 연결당 한 번만 초기화합니다. 파이프라이닝으로 다음 요청의
+ * 앞부분이 이미 rio 버퍼에 들어와 있을 수 있어서, 요청마다 새로 만들면 그 바이트를
+ * 잃습니다. 요청을 끝까지(본문 포함) 읽으면 그다음 바이트가 곧 다음 요청입니다.
+ * n번째 요청이 --keepalive-max에 닿으면 can_keep = 0으로 넘겨 그 응답에서 닫게 합니다.
+ * 다음 요청을 기다리는 시간(idle)은 소켓의 읽기 타임아웃(--timeout초)이 정합니다.
+ */
+static void serve_connection(int fd)
+{
+    rio_t rio;
+    int result = CONN_CLOSE;
+
+    rio_readinitb(&rio, fd); /* 연결당 한 번 */
+    for (int n = 1; ; n++) {
+        result = handle_request(fd, &rio, n < cfg.keepalive_max);
+        if (result != CONN_KEEP) {
+            break;
+        }
+    }
+    /* 응답을 보내고 닫는 경우: 클라이언트가 이미 보낸(읽지 않은) 바이트가 있으면
+     * close가 RST를 보내 응답이 사라질 수 있으므로 비우고 닫음 (E-R15) */
+    if (result == CONN_CLOSE) {
+        conn_linger(fd);
+    }
+}
+
 /*
  * Tiny의 doit은 모든 일을 직접 했음. 여기서는 역할별 함수를 순서대로 부르고,
  * 함수가 오류 상태 코드를 돌려주면 http_error_send로 응답하고 끝냅니다.
@@ -454,31 +489,30 @@ static const char *request_error_msg(int status)
  * 흐름: 요청 읽기(요청 줄 + 헤더, request_read) → URI 확인 → URI 해석
  *       → 메서드 확인 → 파일 찾기 → (정적) 읽기 권한 확인 → static_file_serve
  *                                   (동적) 실행 권한 확인 → cgi_serve
- * 이 단계에서는 모든 응답 뒤에 연결을 닫습니다 (keep-alive는 M5-4a).
  * [M5-2] 헤더 다음에 본문을 읽습니다: 크기 검사(413) → Expect(417, 100 Continue)
  *   → Content-Length만큼 읽기. 본문을 받지 않고 거절했으면 남은 바이트를 비우고 닫습니다.
+ * [M5-4a] 이름을 doit → handle_request로 바꾸고, rio는 serve_connection에게 받습니다.
+ *   반환값 CONN_KEEP / CONN_CLOSE / CONN_DEAD로 연결을 유지할지 알려 줍니다.
+ *   1단계 규칙: 클라이언트가 유지를 원하고(HTTP/1.1, close 아님), 요청 수 상한 전이고,
+ *   본문 없는 GET이 정적 파일 200을 받았을 때만 유지. 오류·HEAD·CGI는 닫음 (M5-4b에서 넓힘)
  */
-void doit(int fd)
+static int handle_request(int fd, rio_t *rp, int can_keep)
 {
     struct http_request req; /* [M5-1] 요청 줄, 헤더 필드, 원본 헤더 블록 */
     char filename[MAXLINE], cgiargs[MAXLINE];
     struct stat sbuf;
-    rio_t rio;
     int is_static;
     int status;
-    int head; /* HEAD 요청이면 1: 헤더는 GET과 같고 본문만 뺌 */
-    int unread; /* 읽지 않은 요청 바이트가 남았을 수 있으면 1 → 닫기 전에 비움 */
+    int head;            /* HEAD 요청이면 1: 헤더는 GET과 같고 본문만 뺌 */
+    int result = CONN_CLOSE; /* 돌려줄 값. 유지할 응답에서만 CONN_KEEP으로 바꿈 */
 
-    /* 1. 요청 읽기: 연결에 읽기 버퍼를 붙이고 요청 줄과 헤더를 파싱한다 */
+    /* 1. 요청 읽기: 요청 줄과 헤더를 파싱한다 (요청마다 구조체를 새로 비움) */
     http_request_init(&req);
-    rio_readinitb(&rio, fd);
-    status = request_read(&rio, &req);
-    if (status < 0) { /* 끊김·타임아웃: 응답할 상대가 없으므로 그냥 끝냄 */
-        return;
+    status = request_read(rp, &req);
+    if (status < 0) { /* 끊김·타임아웃(다음 요청이 안 옴 포함): 응답할 상대가 없음 */
+        return CONN_DEAD;
     }
     head = strcmp(req.method, "HEAD") == 0;
-    /* 요청 읽기가 중간에 멈췄거나(오류), 본문이 있는데 아직 읽지 않았으면 1 */
-    unread = status > 0 || (req.has_content_length && req.content_length > 0);
     if (status > 0) { /* 형식 오류 400, 긴 요청 줄 414, 501, 505 */
         http_error_send(fd, head, status, "request", request_error_msg(status));
         goto done;
@@ -495,7 +529,8 @@ void doit(int fd)
         const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
         if (rio_writen(fd, (void *)cont, sizeof(cont) - 1) !=
             (ssize_t)(sizeof(cont) - 1)) {
-            goto done; /* 끊김 */
+            result = CONN_DEAD; /* 끊김 */
+            goto done;
         }
         status = 0;
     }
@@ -507,9 +542,9 @@ void doit(int fd)
 
     /* [M5-2] 1-2. 본문 읽기: 헤더를 읽은 같은 rio로 Content-Length만큼.
      * GET에 붙은 본문도 읽어서 버림 (읽지 않으면 keep-alive에서 다음 요청으로 읽힘) */
-    status = http_body_read(&req, &rio);
+    status = http_body_read(&req, rp);
     if (status < 0) { /* 본문 도중 끊김·타임아웃: 응답할 상대가 없음 */
-        unread = 0;
+        result = CONN_DEAD;
         goto done;
     }
     if (status > 0) { /* 메모리 부족 500 */
@@ -517,7 +552,7 @@ void doit(int fd)
                         "Tiny couldn't allocate the request body");
         goto done;
     }
-    unread = 0; /* 요청을 끝까지 읽었음 */
+    /* 여기까지 왔으면 요청을 끝까지 읽었음 → 다음 바이트가 다음 요청 */
 
     /* 2. URI 확인: 폴더 밖으로 나가는 ..이 있으면 403 */
     if (uri_check(req.uri) != 0) {
@@ -561,10 +596,18 @@ void doit(int fd)
             http_error_send(fd, head, 403, filename, "Tiny couldn't read the file");
             goto done;
         }
-        status = static_file_serve(fd, filename, sbuf.st_size, head);
-        if (status != 0) { /* 파일 준비 실패: 아직 아무것도 안 보냈으므로 500 */
+        /* [M5-4a] 유지 여부를 응답 헤더(Connection)에 써야 하므로 보내기 전에 정함 */
+        int keep = can_keep && req.keep_alive && req.minor == 1 &&
+                   strcmp(req.method, "GET") == 0 && req.body_len == 0;
+
+        status = static_file_serve(fd, filename, sbuf.st_size, head, keep);
+        if (status > 0) { /* 파일 준비 실패: 아직 아무것도 안 보냈으므로 500 */
             http_error_send(fd, head, status, filename,
                             "Tiny couldn't open the file");
+        } else if (status < 0) { /* 보내다 끊김 */
+            result = CONN_DEAD;
+        } else if (keep) {
+            result = CONN_KEEP;
         }
     } else {
         if (file_check_executable(&sbuf) != 0) {
@@ -584,11 +627,10 @@ void doit(int fd)
     }
 
 done:
-    if (unread) {
-        conn_linger(fd);
-    }
     http_request_free(&req); /* [M5-2] 본문 버퍼는 모든 경로에서 해제 */
+    return result;
 }
+
 /*
  * [M5-1] 응답을 보낸 뒤, 아직 읽지 않은 요청 바이트를 잠깐 읽어 버립니다.
  * 받은 바이트가 남은 소켓을 close하면 커널은 FIN 대신 RST를 보냅니다. 그러면
@@ -597,6 +639,8 @@ done:
  *   1. shutdown(SHUT_WR): 보내기 쪽만 먼저 닫아 FIN을 보냄 → 클라이언트는 응답 끝을 앎
  *   2. 남은 바이트를 읽어 버림. 1초 동안 안 오거나, 끝(0)이 오거나, LINGER_MAX를
  *      넘으면 멈춤 (작업자를 오래 붙잡지 않게)
+ * [M5-4a] 응답 뒤 닫는 모든 연결에 씁니다 (serve_connection). 파이프라이닝으로
+ *   보낸 다음 요청이 남아 있어도 RST 없이 닫힙니다.
  * 실제 close는 worker_main이 합니다.
  */
 #define LINGER_MAX BODY_MAX /* 비울 최대 바이트: 본문 상한과 같은 1 MiB */
@@ -795,11 +839,13 @@ static int file_check_executable(const struct stat *sbuf)
  *     실패하면 이 요청만 끝냄
  * [M5-1] HEAD면 GET과 같은 헤더(Content-Length 포함)만 보내고 본문은 뺍니다.
  *   파일 내용이 필요 없으므로 열지도 않습니다 (읽기 권한은 doit이 이미 확인).
- * 반환: 0(보냈거나 보내다 끊김), 500(파일 준비 실패, 아직 아무것도 안 보냄)
+ * [M5-4a] keep이면 Connection: keep-alive, 아니면 close를 씁니다.
+ * 반환: 0(다 보냄), 500(파일 준비 실패, 아직 아무것도 안 보냄), -1(보내다 끊김)
  */
 static int static_file_serve(int fd, const char *filename, int filesize,
-                             int head)
+                             int head, int keep)
 {
+    int result = 0;
     char header[MAXBUF];
     int header_len; /* snprintf가 만든 헤더 길이 (strlen 대신 사용) */
     int srcfd;
@@ -825,22 +871,25 @@ static int static_file_serve(int fd, const char *filename, int filesize,
     header_len = snprintf(header, sizeof(header),
                           "HTTP/1.1 200 OK\r\n"
                           "Server: Tiny Web Server\r\n"
-                          "Connection: close\r\n"
+                          "Connection: %s\r\n"
                           "Content-Length: %d\r\n"
                           "Content-Type: %s\r\n\r\n",
-                          filesize, http_mime_type(filename)); /* get_filetype 대신 */
+                          keep ? "keep-alive" : "close", filesize,
+                          http_mime_type(filename)); /* get_filetype 대신 */
 
     /* 4. 헤더를 다 보냈을 때만 본문 전송 (Rio_writen 대신 rio_writen).
      * 쓰기가 실패하면(클라이언트가 끊음) 더 보내지 않고 정리만 함 */
-    if (rio_writen(fd, header, header_len) == header_len && srcp != NULL) {
-        rio_writen(fd, srcp, filesize); /* 실패해도 이 요청만 끝남 */
+    if (rio_writen(fd, header, header_len) != header_len) {
+        result = -1;
+    } else if (srcp != NULL && rio_writen(fd, srcp, filesize) != filesize) {
+        result = -1;
     }
 
     /* 5. 정리: mmap했던 경우에만 해제 (Munmap 대신 munmap) */
     if (srcp != NULL) {
         munmap(srcp, filesize);
     }
-    return 0;
+    return result;
 }
 
 /*
