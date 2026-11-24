@@ -650,7 +650,10 @@ Phase 1에 이미 있는 것: `404`(파일 없음), `403`(권한 없음, 폴더 
 
 ### 8.6 메모리와 CI
 
-- 위 요청을 모두 보낸 뒤 서버를 종료해 ASan/LeakSanitizer가 누수를 보고하지 않는지 확인합니다. 특히 413, 본문 도중 끊김, CGI 실패·시간 초과 경로에서 `body`, 출력 버퍼, 임시 파일 fd가 해제되는지 봅니다.
+- **누수는 Linux CI의 단위 테스트로 확인합니다.** 메모리를 잡는 코드(본문 읽기는 `src/http.c`, CGI 실행은 `src/cgi.c`)를 모듈에 두고, `tests/http_test.c`와 `tests/cgi_test.c`에서 실패 경로까지 검사합니다. CI의 `ubuntu-latest`에서 `make verify`를 돌리면 테스트가 끝날 때 LeakSanitizer가 누수를 보고합니다.
+  - `http_test.c`: pipe로 본문을 CL보다 적게 쓰고 닫기(본문 도중 끊김), CL > 1 MiB(`413`, malloc 없음)
+  - `cgi_test.c`: `fail`, `nohdr`, `big`, `slow` 경로에서 출력 버퍼, 파이프, 임시 파일 fd 해제
+- 서버를 띄워 놓고 끄는 방식으로는 확인하지 않습니다. 안전한 종료(M7) 전에는 Ctrl-C로 끄면 LeakSanitizer가 보고하지 않고, macOS에서는 누수 검사가 원래 돌지 않기 때문입니다. 서버 전체의 누수 확인은 M7 이후에 합니다.
 - CI(`.github/workflows/ci.yml`)에 `make tsan`을 추가합니다.
 - 기능 테스트는 `tests/functional/`에 같은 요청으로 추가합니다.
 
@@ -670,10 +673,10 @@ Phase 1에 이미 있는 것: `404`(파일 없음), `403`(권한 없음, 폴더 
 | ----- | ------------------------------------------------------------------------------------------------------------------ | ----------- |
 | M4-1  | 연결당 스레드 (커밋 하나, 비교 기준)                                                                               |             |
 | M4-2  | `conn_queue` 모듈 + 스레드 풀 + CLI 인자 + `make tsan` CI                                                          | M4-1        |
-| M4-3  | 소켓 타임아웃, fork 전 envp, `FD_CLOEXEC` + 자식 fd 정리                                                           | M4-2        |
+| M4-3  | 소켓 타임아웃, fork 전 envp, `FD_CLOEXEC` + 자식 fd 정리, 테스트용 CGI `slow` (fd 상속 확인용)                     | M4-2        |
 | M5-1  | 요청 구조체·파서 + `http_test.c`, 요청 줄 오류(414/505), MIME, `HTTP/1.1` 상태 줄, 모든 응답에 CL·Connection, HEAD | M4-3        |
-| M5-2  | 본문 읽기, 상한, 413, Expect, adder POST                                                                           | M5-1        |
-| M5-3  | CGI 구조 변경 (임시 파일 입력, 파이프 출력, 500/504, 테스트용 CGI)                                                 | M5-2        |
+| M5-2  | 본문 읽기, 상한, 413, Expect, CGI 입력(임시 파일), adder POST·안내 메시지                                          | M5-1        |
+| M5-3  | CGI 구조 변경 (파이프 출력, 500/504, 테스트용 CGI `fail`·`nohdr`·`big`)                                            | M5-2        |
 | M5-4a | keep-alive: 정적 GET만, 요청 수 상한                                                                               | M5-1        |
 | M5-4b | keep-alive 규칙 전체                                                                                               | M5-3, M5-4a |
 | M7    | 시그널 전용 스레드, 안전한 종료                                                                                    | M4-2        |
