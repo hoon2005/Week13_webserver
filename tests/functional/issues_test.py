@@ -158,5 +158,77 @@ class PathTest(unittest.TestCase):
                 self.assertEqual(get(self.server, path)[0], 403)
 
 
+class CgiResponseTest(unittest.TestCase):
+    """B2: CGI가 준 헤더와 상태를 응답 형식에 맞게 옮긴다"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server("--timeout", "1")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def cgi(self, name, output):
+        """output을 그대로 출력하는 CGI를 만들고 그 경로를 돌려줌"""
+        path = os.path.join(self.server.www, "cgi-bin", name)
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\nprintf '%s'\n" % output)
+        os.chmod(path, 0o755)
+        return "/cgi-bin/" + name
+
+    def test_Transfer_Encoding을_준_CGI는_500이다(self):
+        path = self.cgi("te", "Transfer-Encoding: chunked\\n\\n1\\r\\na\\r\\n0\\r\\n\\r\\n")
+        status, headers, _, _ = get(self.server, path)
+        self.assertEqual(status, 500)
+        self.assertNotIn("transfer-encoding", headers)
+
+    def test_1xx_상태를_준_CGI는_500이다(self):
+        path = self.cgi("s100", "Status: 100 Continue\\n\\n")
+        self.assertEqual(get(self.server, path)[0], 500)
+
+    def test_상태가_숫자_세_자리가_아니면_500이다(self):
+        path = self.cgi("sbad", "Status: 2xx OK\\n\\n")
+        self.assertEqual(get(self.server, path)[0], 500)
+
+    def test_한_구간_전용_헤더는_빼고_나머지는_전달한다(self):
+        path = self.cgi(
+            "hop",
+            "Content-Type: text/plain\\nKeep-Alive: timeout=9\\n"
+            "Connection: X-Hop\\nX-Hop: 1\\nX-End: 2\\n\\nbody",
+        )
+        status, headers, body, names = get(self.server, path)
+        self.assertEqual((status, body), (200, b"body"))
+        self.assertEqual(headers["x-end"], "2")
+        self.assertNotIn("keep-alive", headers)
+        self.assertNotIn("x-hop", headers)
+        self.assertEqual(names.count("connection"), 1)
+
+    def test_204와_304는_본문과_길이가_없고_다음_응답이_밀리지_않는다(self):
+        for code in ("204 No Content", "304 Not Modified"):
+            with self.subTest(code=code), self.server.connect() as sock:
+                path = self.cgi("s" + code[:3], "Status: %s\\n\\nleftover" % code)
+                f = sock.makefile("rb")
+                sock.sendall(b"GET %s HTTP/1.1\r\nHost: x\r\n\r\n" % path.encode())
+                status, headers, body, _ = read_response(f)
+                self.assertEqual((status, body), (int(code[:3]), b""))
+                self.assertNotIn("content-length", headers)
+                self.assertEqual(headers["connection"], "keep-alive")
+                sock.sendall(b"GET /home.html HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertEqual(read_response(f)[0], 200)
+
+    def test_헤더_줄이_하나도_없는_CGI는_지금처럼_200이다(self):
+        for output in ("\n\nbody", "\r\n\r\nbody"):
+            path = self.cgi("nohdrline", output)
+            status, _, body, _ = get(self.server, path)
+            self.assertEqual((status, body), (200, b"body"))
+
+    def test_상태를_준_CGI의_상태와_본문을_전달한다(self):
+        path = self.cgi("s404", "Status: 404 Nope\\nContent-Type: text/plain\\n\\nno")
+        status, headers, body, _ = get(self.server, path)
+        self.assertEqual((status, body), (404, b"no"))
+        self.assertEqual(headers["content-length"], "2")
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

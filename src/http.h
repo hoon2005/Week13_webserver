@@ -89,6 +89,35 @@ long http_body_length(const struct http_request *req);
 /* Content-Length 값 해석: 0 이상 정수만. 성공 0, 실패 -1 */
 int http_parse_content_length(const char *value, long *out);
 
+/*
+ * 헤더 블록("이름: 값" 줄이 이어진 것, 빈 줄 제외)에서 pos 위치의 헤더 하나를
+ * 읽고 pos를 다음 줄로 옮깁니다. 이름과 값은 블록 안을 가리키며 NUL로 끝나지
+ * 않습니다. CGI 출력, 백엔드 응답, 손님의 원본 헤더에 같이 씁니다.
+ * 반환: 1 (하나 읽음), 0 (끝), -1 (형식 오류)
+ */
+struct http_header {
+    const char *line; /* 이름부터 값 끝까지 (줄바꿈 제외) */
+    size_t line_len;
+    const char *name;
+    size_t name_len;
+    const char *value; /* 앞뒤 공백을 뺀 값 */
+    size_t value_len;
+};
+int http_header_next(const char *block, size_t len, size_t *pos,
+                     struct http_header *out);
+
+/* 헤더 이름이 name과 같으면 1 (대소문자 무시) */
+int http_header_is(const struct http_header *h, const char *name);
+
+/*
+ * 다음 구간으로 넘길 헤더만 "이름: 값\r\n"으로 dst에 복사합니다 (RFC 9110 7.6.1).
+ *   빼는 것: 한 구간 전용 헤더(Connection, Keep-Alive, Transfer-Encoding 등),
+ *           Connection 값에 적힌 헤더, skip(NULL로 끝나는 배열)에 적은 헤더
+ * 반환: 복사한 길이, 형식 오류이거나 dst가 모자라면 -1
+ */
+long http_headers_filter(const char *block, size_t len, const char *const *skip,
+                         char *dst, size_t cap);
+
 /* 파일 이름의 마지막 확장자로 Content-Type을 정합니다 */
 const char *http_mime_type(const char *filename);
 

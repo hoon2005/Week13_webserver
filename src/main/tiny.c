@@ -24,6 +24,7 @@
 #include "conn_queue.h"
 #include "http.h"
 
+#include <ctype.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <strings.h>
@@ -305,14 +306,21 @@ static int write_all(int fd, const void *buf, size_t n)
  *   상태 줄 HTTP/1.1, 모든 응답에 Content-Length와 Connection.
  *   content_type이 NULL이면 Content-Type 줄을 쓰지 않음 (CGI는 extra에 들어 있음).
  *   extra: "이름: 값\r\n" 형식의 추가 헤더 (없으면 NULL)
+ *   length가 -1이면 Content-Length 줄을 쓰지 않음 (본문이 없는 204, 304)
  */
 static int response_head_send(int fd, int status, const char *reason,
                               const char *content_type, const char *extra,
-                              size_t length, int keep)
+                              long length, int keep)
 {
     char header[MAXBUF * 2];
     char type_line[HTTP_FIELD_MAX + 32] = "";
+    char length_line[48] = "";
     int n;
+
+    if (length >= 0) {
+        snprintf(length_line, sizeof(length_line), "Content-Length: %ld\r\n",
+                 length);
+    }
 
     if (content_type != NULL) {
         snprintf(type_line, sizeof(type_line), "Content-Type: %s\r\n",
@@ -321,11 +329,11 @@ static int response_head_send(int fd, int status, const char *reason,
     n = snprintf(header, sizeof(header),
                  "HTTP/1.1 %d %s\r\n"
                  "Server: Tiny Web Server\r\n"
-                 "%s%s"
-                 "Content-Length: %zu\r\n"
+                 "%s%s%s"
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
-                 extra ? extra : "", length, keep ? "keep-alive" : "close");
+                 extra ? extra : "", length_line,
+                 keep ? "keep-alive" : "close");
     if (n < 0 || n >= (int)sizeof(header)) {
         return -1;
     }
@@ -354,8 +362,8 @@ static int error_reply(int fd, const struct http_request *req, int status,
     if (body_len >= (int)sizeof(body)) {
         body_len = sizeof(body) - 1;
     }
-    if (response_head_send(fd, status, NULL, "text/html", NULL,
-                           (size_t)body_len, *keep) < 0 ||
+    if (response_head_send(fd, status, NULL, "text/html", NULL, body_len,
+                           *keep) < 0 ||
         (send_body && write_all(fd, body, (size_t)body_len) < 0)) {
         *keep = 0;
     }
@@ -686,7 +694,7 @@ static int static_serve(int fd, const struct http_request *req,
     close(srcfd);
 
     if (response_head_send(fd, 200, NULL, http_mime_type(filename), NULL,
-                           (size_t)filesize, *keep) < 0 ||
+                           (long)filesize, *keep) < 0 ||
         (srcp != NULL && write_all(fd, srcp, (size_t)filesize) < 0)) {
         *keep = 0; /* 응답을 보내다 실패하면 바로 닫음 */
     }
@@ -866,29 +874,65 @@ done:
 }
 
 /*
+ * CGI의 "Status: 404 Not Found" 값을 해석합니다. 성공 0, 실패 -1.
+ * 1xx는 중간 응답이라 최종 응답이 될 수 없으므로 실패로 봅니다.
+ */
+static int cgi_status_parse(const struct http_header *h, int *status,
+                            char *reason, size_t cap)
+{
+    const char *v = h->value;
+    const char *end = h->value + h->value_len;
+
+    if (h->value_len < 3 || !isdigit((unsigned char)v[0]) ||
+        !isdigit((unsigned char)v[1]) || !isdigit((unsigned char)v[2])) {
+        return -1;
+    }
+    *status = (v[0] - '0') * 100 + (v[1] - '0') * 10 + (v[2] - '0');
+    if (*status < 200 || *status > 599) {
+        return -1;
+    }
+    v += 3;
+    while (v < end && *v == ' ') {
+        v++;
+    }
+    snprintf(reason, cap, "%.*s", (int)(end - v), v);
+    if (reason[0] == '\0') {
+        snprintf(reason, cap, "%s", http_status_text(*status));
+    }
+    return 0;
+}
+
+/*
  * CGI 출력("헤더 몇 줄 + 빈 줄 + 본문")을 나눠 응답을 만듭니다 (4.4).
  *   Status: 404 Not Found가 있으면 그 상태, 없으면 200
  *   Content-Length, Connection은 CGI 값을 무시하고 서버가 직접 씀
- *   빈 줄이 없거나, 출력이 비었거나, ':' 없는 헤더 줄이면 500
+ *   한 구간 전용 헤더(Keep-Alive 등)는 빼고 나머지는 그대로 전달
+ *   204, 304는 본문이 없는 상태라 본문과 Content-Length를 보내지 않음
+ *   빈 줄이 없거나, 출력이 비었거나, 헤더 형식이 틀리거나, 1xx 상태거나,
+ *   Transfer-Encoding이 있으면 500. (이 헤더만 떼고 보내면 CGI가 이미 chunked로
+ *   나눠 쓴 본문을 일반 본문인 것처럼 내보낼 수 있음)
  */
 static int cgi_reply(int fd, const struct http_request *req, const char *out,
                      size_t len, int *keep)
 {
+    static const char *const skip[] = {"Status", "Content-Length", NULL};
     char extra[MAXBUF];
     char reason[64] = "OK";
-    size_t extra_len = 0, hdr_end = 0, body_start = 0, pos = 0;
+    struct http_header h;
+    size_t hdr_end = 0, body_start = 0, pos = 0;
+    long extra_len, body_len;
     int status = 200;
-    int found = 0;
+    int found = 0, rc;
 
     for (size_t i = 0; i < len; i++) { /* 헤더와 본문을 나누는 빈 줄 찾기 */
         if (i + 1 < len && out[i] == '\n' && out[i + 1] == '\n') {
-            hdr_end = i + 1;
+            hdr_end = i > 0 ? i + 1 : 0; /* 빈 줄로 시작하면 헤더가 없음 */
             body_start = i + 2;
             found = 1;
             break;
         }
         if (i + 3 < len && memcmp(out + i, "\r\n\r\n", 4) == 0) {
-            hdr_end = i + 2;
+            hdr_end = i > 0 ? i + 2 : 0;
             body_start = i + 4;
             found = 1;
             break;
@@ -899,74 +943,34 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
                            "CGI output has no header", keep);
     }
 
-    extra[0] = '\0';
-    while (pos < hdr_end) { /* 헤더 줄 하나씩 */
-        size_t eol = pos, end;
-        const char *colon;
-        while (eol < hdr_end && out[eol] != '\n') {
-            eol++;
+    while ((rc = http_header_next(out, hdr_end, &pos, &h)) == 1) {
+        if (http_header_is(&h, "Transfer-Encoding")) {
+            return error_reply(fd, req, 500, req->uri,
+                               "CGI output has Transfer-Encoding", keep);
         }
-        end = eol;
-        if (end > pos && out[end - 1] == '\r') {
-            end--;
+        if (http_header_is(&h, "Status") &&
+            cgi_status_parse(&h, &status, reason, sizeof(reason)) < 0) {
+            return error_reply(fd, req, 500, req->uri,
+                               "Malformed CGI status", keep);
         }
-        if (end > pos) {
-            size_t line_len = end - pos;
-            colon = memchr(out + pos, ':', line_len);
-            if (colon == NULL) {
-                return error_reply(fd, req, 500, req->uri,
-                                   "Malformed CGI header", keep);
-            }
-            size_t name_len = (size_t)(colon - (out + pos));
-            if (name_len == 6 && strncasecmp(out + pos, "Status", 6) == 0) {
-                const char *v = colon + 1;
-                const char *vend = out + end;
-                char num[4] = "";
-                while (v < vend && (*v == ' ' || *v == '\t')) {
-                    v++;
-                }
-                if (vend - v < 3) {
-                    return error_reply(fd, req, 500, req->uri,
-                                       "Malformed CGI status", keep);
-                }
-                memcpy(num, v, 3);
-                status = atoi(num);
-                if (status < 100 || status > 599) {
-                    return error_reply(fd, req, 500, req->uri,
-                                       "Malformed CGI status", keep);
-                }
-                v += 3;
-                while (v < vend && *v == ' ') {
-                    v++;
-                }
-                snprintf(reason, sizeof(reason), "%.*s", (int)(vend - v), v);
-                if (reason[0] == '\0') {
-                    snprintf(reason, sizeof(reason), "%s",
-                             http_status_text(status));
-                }
-            } else if ((name_len == 14 &&
-                        strncasecmp(out + pos, "Content-Length", 14) == 0) ||
-                       (name_len == 10 &&
-                        strncasecmp(out + pos, "Connection", 10) == 0)) {
-                /* 서버가 직접 씀 */
-            } else {
-                if (extra_len + line_len + 3 > sizeof(extra)) {
-                    return error_reply(fd, req, 500, req->uri,
-                                       "CGI header too large", keep);
-                }
-                memcpy(extra + extra_len, out + pos, line_len);
-                extra_len += line_len;
-                memcpy(extra + extra_len, "\r\n", 3);
-                extra_len += 2;
-            }
-        }
-        pos = eol + 1;
     }
+    extra_len = http_headers_filter(out, hdr_end, skip, extra,
+                                    sizeof(extra) - 1);
+    if (rc < 0 || extra_len < 0) {
+        return error_reply(fd, req, 500, req->uri, "Malformed CGI header",
+                           keep);
+    }
+    extra[extra_len] = '\0';
 
-    if (response_head_send(fd, status, reason, NULL, extra, len - body_start,
+    body_len = (long)(len - body_start);
+    if (status == 204 || status == 304) {
+        body_len = 0;
+    }
+    if (response_head_send(fd, status, reason, NULL, extra,
+                           (status == 204 || status == 304) ? -1 : body_len,
                            *keep) < 0 ||
-        (len > body_start &&
-         write_all(fd, out + body_start, len - body_start) < 0)) {
+        (body_len > 0 &&
+         write_all(fd, out + body_start, (size_t)body_len) < 0)) {
         *keep = 0;
     }
     return status;

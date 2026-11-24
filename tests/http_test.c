@@ -316,6 +316,73 @@ static void test_host_format(void)
     free(req);
 }
 
+/* 블록을 걸러 낸 결과가 expected와 같은지 */
+static int filter_gives(const char *block, const char *const *skip,
+                        const char *expected)
+{
+    char out[256];
+    long n = http_headers_filter(block, strlen(block), skip, out, sizeof(out));
+
+    return n == (long)strlen(expected) && memcmp(out, expected, (size_t)n) == 0;
+}
+
+static void test_header_next_splits_lines(void)
+{
+    const char *block = "Content-Type:  text/html \r\nX: a:b\nEmpty:\r\n";
+    struct http_header h;
+    size_t pos = 0;
+
+    TEST_CHECK(http_header_next(block, strlen(block), &pos, &h) == 1);
+    TEST_CHECK(http_header_is(&h, "content-type"));
+    TEST_CHECK(h.value_len == 9 && memcmp(h.value, "text/html", 9) == 0);
+    TEST_CHECK(http_header_next(block, strlen(block), &pos, &h) == 1);
+    TEST_CHECK(h.value_len == 3 && memcmp(h.value, "a:b", 3) == 0);
+    TEST_CHECK(http_header_next(block, strlen(block), &pos, &h) == 1);
+    TEST_CHECK(http_header_is(&h, "Empty") && h.value_len == 0);
+    TEST_CHECK(http_header_next(block, strlen(block), &pos, &h) == 0);
+}
+
+static void test_header_next_rejects_bad_lines(void)
+{
+    static const char *const bad[] = {"no colon\r\n", ": value\r\n",
+                                      "Bad Name: x\r\n", " folded: x\r\n",
+                                      "X: a\rb\r\n"};
+
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct http_header h;
+        size_t pos = 0;
+        TEST_CHECK_(http_header_next(bad[i], strlen(bad[i]), &pos, &h) == -1,
+                    "%s", bad[i]);
+    }
+}
+
+static void test_filter_drops_hop_by_hop(void)
+{
+    static const char *const none[] = {NULL};
+    static const char *const skip[] = {"Content-Length", NULL};
+
+    TEST_CHECK(filter_gives("A: 1\r\nConnection: close\r\nKeep-Alive: x\r\n"
+                            "TE: y\r\nUpgrade: z\r\nB: 2\r\n",
+                            none, "A: 1\r\nB: 2\r\n"));
+    /* Connection에 적힌 이름. 대소문자를 구분하지 않고, 앞부분만 같으면 아님 */
+    TEST_CHECK(filter_gives("X-Hop: 1\r\nConnection: close, x-hop\r\n"
+                            "X-Hop2: 2\r\n",
+                            none, "X-Hop2: 2\r\n"));
+    /* 호출한 쪽이 직접 쓸 헤더 */
+    TEST_CHECK(filter_gives("Content-Length: 3\r\nA: 1\r\n", skip, "A: 1\r\n"));
+    TEST_CHECK(filter_gives("", none, ""));
+    TEST_CHECK(!filter_gives("broken\r\n", none, ""));
+}
+
+static void test_filter_reports_small_buffer(void)
+{
+    static const char *const none[] = {NULL};
+    char out[8];
+
+    TEST_CHECK(http_headers_filter("Abc: 1\r\n", 8, none, out, 8) == 8);
+    TEST_CHECK(http_headers_filter("Abcd: 1\r\n", 9, none, out, 8) == -1);
+}
+
 TEST_LIST = {
     {"request_line_ok", test_request_line_ok},
     {"request_line_errors", test_request_line_errors},
@@ -331,4 +398,9 @@ TEST_LIST = {
     {"줄 중간에 CR이 있으면 400이다", test_cr_inside_line_is_rejected},
     {"/로 시작하지 않는 URI는 400이다", test_uri_must_start_with_slash},
     {"Host는 이름[:포트] 형식만 받고 나머지는 400이다", test_host_format},
+    {"헤더 블록을 한 줄씩 이름과 값으로 나눈다", test_header_next_splits_lines},
+    {"형식이 틀린 헤더 줄은 오류다", test_header_next_rejects_bad_lines},
+    {"한 구간 전용 헤더와 Connection에 적힌 헤더를 뺀다",
+     test_filter_drops_hop_by_hop},
+    {"걸러 낸 헤더가 버퍼보다 길면 오류다", test_filter_reports_small_buffer},
     {NULL, NULL}};

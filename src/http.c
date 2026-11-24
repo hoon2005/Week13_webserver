@@ -365,6 +365,125 @@ long http_body_length(const struct http_request *req)
     return req->has_content_length ? req->content_length : 0;
 }
 
+int http_header_next(const char *block, size_t len, size_t *pos,
+                     struct http_header *out)
+{
+    const char *line = block + *pos;
+    const char *nl, *colon, *v, *vend;
+    size_t n;
+
+    if (*pos >= len) {
+        return 0;
+    }
+    nl = memchr(line, '\n', len - *pos);
+    n = nl ? (size_t)(nl - line + 1) : len - *pos;
+    *pos += n;
+    n = line_content_len(line, n);
+
+    colon = memchr(line, ':', n);
+    if (colon == NULL || colon == line || has_bad_bytes(line, n)) {
+        return -1;
+    }
+    for (const char *p = line; p < colon; p++) {
+        if (is_space(*p)) {
+            return -1; /* 이름 안이나 앞의 공백 (앞줄에서 이어진 줄 포함) */
+        }
+    }
+    v = colon + 1;
+    vend = line + n;
+    while (v < vend && is_space(*v)) {
+        v++;
+    }
+    while (vend > v && is_space(vend[-1])) {
+        vend--;
+    }
+    out->line = line;
+    out->line_len = (size_t)(vend - line);
+    out->name = line;
+    out->name_len = (size_t)(colon - line);
+    out->value = v;
+    out->value_len = (size_t)(vend - v);
+    return 1;
+}
+
+int http_header_is(const struct http_header *h, const char *name)
+{
+    return h->name_len == strlen(name) &&
+           strncasecmp(h->name, name, h->name_len) == 0;
+}
+
+/* Connection 값 "a, b"의 조각 중 하나가 헤더 h의 이름이면 1 */
+static int connection_lists(const struct http_header *conn,
+                            const struct http_header *h)
+{
+    const char *p = conn->value;
+    const char *end = conn->value + conn->value_len;
+
+    while (p < end) {
+        const char *tok;
+        while (p < end && (is_space(*p) || *p == ',')) {
+            p++;
+        }
+        tok = p;
+        while (p < end && !is_space(*p) && *p != ',') {
+            p++;
+        }
+        if ((size_t)(p - tok) == h->name_len && p > tok &&
+            strncasecmp(tok, h->name, h->name_len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 이 구간에서만 쓰는 헤더라 다음 구간으로 넘기지 않으면 1 */
+static int header_is_hop_by_hop(const char *block, size_t len,
+                                const struct http_header *h)
+{
+    static const char *const names[] = {"Connection",        "Proxy-Connection",
+                                        "Keep-Alive",        "TE",
+                                        "Transfer-Encoding", "Upgrade"};
+    struct http_header conn;
+    size_t pos = 0;
+
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (http_header_is(h, names[i])) {
+            return 1;
+        }
+    }
+    while (http_header_next(block, len, &pos, &conn) == 1) {
+        if (http_header_is(&conn, "Connection") && connection_lists(&conn, h)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+long http_headers_filter(const char *block, size_t len, const char *const *skip,
+                         char *dst, size_t cap)
+{
+    struct http_header h;
+    size_t pos = 0, used = 0;
+    int rc;
+
+    while ((rc = http_header_next(block, len, &pos, &h)) == 1) {
+        int drop = header_is_hop_by_hop(block, len, &h);
+        for (size_t i = 0; skip[i] != NULL && !drop; i++) {
+            drop = http_header_is(&h, skip[i]);
+        }
+        if (drop) {
+            continue;
+        }
+        if (used + h.line_len + 2 > cap) {
+            return -1;
+        }
+        memcpy(dst + used, h.line, h.line_len);
+        memcpy(dst + used + h.line_len, "\r\n", 2);
+        used += h.line_len + 2;
+    }
+    return rc < 0 ? -1 : (long)used;
+}
+
 struct mime_entry {
     const char *ext;
     const char *type;
