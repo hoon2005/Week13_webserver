@@ -8,6 +8,8 @@
  *   리뷰에서 나온 안정성 수정 5가지도 반영했습니다. 클라이언트 한 명의 문제
  *   (연결 중단, 깨진 요청, 빈 파일, fork 실패)로 서버 전체가 꺼지지 않고
  *   그 요청만 끝냅니다.
+ *   Phase 2 M4-1: 연결마다 스레드 하나를 만들어 동시에 처리합니다 (conn_thread).
+ *   M4-2에서 스레드 풀로 바꾸고, 이 커밋은 부하 측정 비교 기준으로 남깁니다.
  *   사용법: ./build/tiny <port>
  */
 #include "csapp.h"
@@ -15,6 +17,9 @@
 
 /* M1 */
 static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 open_listenfd 대신 */
+
+/* M4-1: 연결당 스레드 */
+static void *conn_thread(void *arg); /* 연결 하나를 맡아 doit → close 후 끝남 */
 
 /* M2: 요청 처리 */
 void doit(int fd);
@@ -48,12 +53,16 @@ static void cgi_child_run(int fd, const char *filename, const char *cgiargs); /*
  * 1) SIGPIPE를 무시하도록 설정한다
  * 2) 실행 인자로 받은 포트에 리스닝 소켓을 연다 (listen_socket_open)
  * 3) 무한 반복: accept로 연결 하나를 꺼내 connfd를 받고
- *    → doit(connfd)로 요청 하나를 처리하고 → close
+ *    → [M4-1] 스레드를 하나 만들어 그 연결을 넘기고, 바로 다음 accept로 돌아감
+ *       (예전에는 main이 doit을 직접 불러, 한 손님이 끝날 때까지 다음 손님이 기다렸음)
  */
 int main(int argc, char **argv)
 {
     int listenfd;
     int connfd;
+    int *connfdp; /* 스레드에 넘길 connfd를 담는 칸 (연결마다 따로 malloc) */
+    pthread_t tid;
+    int err;
     socklen_t clientlen;
     /* Tiny는 sockaddr_storage(IPv4/IPv6 모두 담는 큰 구조체)를 썼음.
      * 우리는 IPv4만 쓰고 Getnameinfo 접속 기록도 뺐으므로 sockaddr_in으로 충분 */
@@ -88,10 +97,47 @@ int main(int argc, char **argv)
             continue;         /* 서버는 계속 살아서 다음 연결을 기다림 */
         }
         /* Tiny의 Getnameinfo + "Accepted connection from ..." 출력은 뺌 (응답 동작과 무관) */
-        doit(connfd);
-        /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
-        close(connfd);
+
+        /* [M4-1] &connfd를 그대로 넘기면, 새 스레드가 값을 읽기 전에 main이
+         * 다음 accept로 connfd를 덮어쓸 수 있음 → 두 스레드가 같은 연결을 맡고
+         * 한 연결은 아무도 처리하지 않게 됨. 그래서 연결마다 칸을 따로 만듦 */
+        connfdp = malloc(sizeof(*connfdp));
+        if (connfdp == NULL) {   /* 메모리가 없으면 */
+            perror("malloc");    /* 원인만 출력하고 */
+            close(connfd);       /* 이 연결만 포기 (서버는 계속 동작) */
+            continue;
+        }
+        *connfdp = connfd;
+
+        /* pthread_create는 errno가 아니라 오류 번호를 반환값으로 돌려줌 → strerror(err) */
+        err = pthread_create(&tid, NULL, conn_thread, connfdp);
+        if (err != 0) {          /* 스레드를 못 만들면 (스레드 수 한도 등) */
+            fprintf(stderr, "pthread_create: %s\n", strerror(err));
+            free(connfdp);       /* 스레드가 받지 못한 칸은 main이 해제하고 */
+            close(connfd);       /* 이 연결만 포기 (서버는 계속 동작) */
+            continue;
+        }
+        /* 성공하면 connfdp와 connfd는 이제 새 스레드 것: main은 해제·close하지 않음 */
     }
+}
+
+/*
+ * [M4-1] 연결 하나를 처음부터 끝까지 맡는 스레드입니다.
+ * main이 malloc한 칸에서 connfd를 꺼낸 뒤 칸을 해제하고,
+ * 예전 main 루프가 하던 일(doit → close)을 그대로 합니다.
+ */
+static void *conn_thread(void *arg)
+{
+    int connfd = *(int *)arg; /* main이 넘긴 칸에서 connfd를 꺼내고 */
+    free(arg);                /* 칸은 바로 해제 (이 스레드만 가진 포인터) */
+
+    /* detach: 끝나면 자원을 스스로 반납. join해 줄 스레드가 없으므로 필요.
+     * 하지 않으면 끝난 스레드의 자원(스택 등)이 계속 남음 */
+    pthread_detach(pthread_self());
+
+    doit(connfd);  /* 요청 하나 처리 (Phase 1 코드 그대로) */
+    close(connfd); /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
+    return NULL;
 }
 
 /*
