@@ -5,13 +5,23 @@
  *     M1 소켓 연결: listen_socket_open, main의 accept 반복문
  *     M2 정적 GET:  doit과 단계 함수들, static_file_serve, http_error_send
  *     M3 CGI GET:   cgi_serve, cgi_child_run
+ *     M4 동시성:    main이 연결을 큐에 넣고, 작업자 스레드들이 꺼내 처리
  *   리뷰에서 나온 안정성 수정 5가지도 반영했습니다. 클라이언트 한 명의 문제
  *   (연결 중단, 깨진 요청, 빈 파일, fork 실패)로 서버 전체가 꺼지지 않고
  *   그 요청만 끝냅니다.
  *   사용법: ./build/tiny <port>
  */
 #include "csapp.h"
+#include "queue.h"
 #include <strings.h> /* strcasecmp (메서드 대소문자 무시 비교) */
+
+#define WORKER_COUNT 16 /* 미리 만들어 둘 작업자 스레드 수 */
+
+static struct queue conn_queue; /* 메인과 작업자들이 함께 쓰는 작업 큐 */
+
+/* M4 */
+static void workers_start(void);
+static void *worker_run(void *arg);
 
 /* M1 */
 static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 open_listenfd 대신 */
@@ -47,8 +57,9 @@ static void cgi_child_run(int fd, const char *filename, char **envp); /* serve_d
 /*
  * 1) SIGPIPE를 무시하도록 설정한다
  * 2) 실행 인자로 받은 포트에 리스닝 소켓을 연다 (listen_socket_open)
- * 3) 무한 반복: accept로 연결 하나를 꺼내 connfd를 받고
- *    → doit(connfd)로 요청 하나를 처리하고 → close
+ * 3) 작업자 스레드들을 만든다 (workers_start)
+ * 4) 무한 반복: accept로 연결 하나를 받아 큐에 넣는다
+ *    요청 처리(doit)와 close는 큐에서 꺼낸 작업자가 한다
  */
 int main(int argc, char **argv)
 {
@@ -78,6 +89,8 @@ int main(int argc, char **argv)
         exit(1);
     }
 
+    workers_start();
+
     while (1) {
         clientlen = sizeof(clientaddr);
         /* Accept(대문자) 대신 accept(소문자): 대문자는 실패하면 exit해서 서버 전체가 꺼짐 */
@@ -88,10 +101,53 @@ int main(int argc, char **argv)
             continue;         /* 서버는 계속 살아서 다음 연결을 기다림 */
         }
         /* Tiny의 Getnameinfo + "Accepted connection from ..." 출력은 뺌 (응답 동작과 무관) */
+        /* CGI를 execve할 때 자동으로 닫히게 함. 이 표시가 없으면 동시에 실행된
+         * 다른 손님의 CGI가 이 연결을 물려받아, 우리가 닫아도 연결이 안 끝남 */
+        if (fcntl(connfd, F_SETFD, FD_CLOEXEC) < 0) {
+            perror("fcntl");
+        }
+        queue_push(&conn_queue, connfd);
+    }
+}
+
+/* ============================== M4 동시성 ============================== */
+
+/*
+ * 작업 큐를 준비하고 작업자 스레드들을 만듭니다.
+ * 서버 시작 단계이므로 실패하면 서버를 종료합니다.
+ */
+static void workers_start(void)
+{
+    pthread_t tid;
+
+    if (queue_init(&conn_queue) < 0) {
+        fprintf(stderr, "queue_init failed\n");
+        exit(1);
+    }
+    for (int i = 0; i < WORKER_COUNT; i++) {
+        if (pthread_create(&tid, NULL, worker_run, NULL) != 0) {
+            fprintf(stderr, "pthread_create failed\n");
+            exit(1);
+        }
+    }
+}
+
+/*
+ * 작업자 스레드 하나가 하는 일입니다. 서버가 꺼질 때까지 반복합니다.
+ * 큐에서 연결 꺼내기(없으면 대기) → 요청 처리 → 연결 닫기
+ */
+static void *worker_run(void *arg)
+{
+    int connfd;
+
+    (void)arg; /* pthread_create의 함수 모양을 맞추기 위한 인자. 쓰지 않음 */
+    while (1) {
+        connfd = queue_pop(&conn_queue);
         doit(connfd);
         /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
         close(connfd);
     }
+    return NULL;
 }
 
 /*
