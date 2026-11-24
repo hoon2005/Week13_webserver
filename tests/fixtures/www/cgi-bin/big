@@ -1,0 +1,4 @@
+#!/bin/sh
+# 테스트용 CGI: 2 MiB 출력 → 출력 상한(1 MiB) 초과로 서버는 500
+printf "Content-type: text/plain\r\n\r\n"
+head -c 2097152 /dev/zero
