@@ -3,6 +3,7 @@
  */
 #include "http.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +39,44 @@ static size_t line_content_len(const char *line, size_t len)
     return len;
 }
 
+/*
+ * 줄 안에 NUL이나 줄 끝이 아닌 CR이 있으면 1.
+ *   NUL: C 문자열이 거기서 끝나 뒤를 못 봄 ("7\0abc"를 7로 읽음)
+ *   CR:  백엔드가 줄을 우리와 다르게 나누면 요청 경계가 어긋남
+ */
+static int has_bad_bytes(const char *s, size_t n)
+{
+    return memchr(s, '\0', n) != NULL || memchr(s, '\r', n) != NULL;
+}
+
+/*
+ * Host 값 검사 (RFC 9112 3.2): 이름[:포트] 또는 [IPv6][:포트].
+ *   이름은 RFC 3986의 reg-name 글자만 받음. 빈 값은 문법에 맞으므로 허용.
+ *   대괄호 안은 쓸 수 있는 글자만 보고 IPv6 주소가 맞는지까지는 보지 않음.
+ */
+static int host_is_valid(const char *v)
+{
+    static const char name_marks[] = "-._~%!$&'()*+,;=";
+
+    if (*v == '[') {
+        size_t n = strspn(++v, "0123456789abcdefABCDEF:.");
+        if (n == 0 || v[n] != ']') {
+            return 0;
+        }
+        v += n + 1;
+    } else {
+        while (*v != '\0' &&
+               (isalnum((unsigned char)*v) || strchr(name_marks, *v) != NULL)) {
+            v++;
+        }
+    }
+    if (*v == ':') {
+        v++;
+        v += strspn(v, "0123456789");
+    }
+    return *v == '\0';
+}
+
 /* "HTTP/x.y" 형식이면 0, 아니면 -1. 맞으면 major, minor를 채움 */
 static int version_parse(const char *v, int *major, int *minor)
 {
@@ -69,6 +108,9 @@ int http_parse_request_line(struct http_request *req, const char *line,
         return (len >= maxlen - 1) ? 414 : 400;
     }
     end = line_content_len(line, len);
+    if (has_bad_bytes(line, end)) {
+        return 400;
+    }
 
     /* 공백으로 나눈 조각이 정확히 세 개(메서드, URI, 버전)여야 함 */
     while (i < end) {
@@ -127,6 +169,12 @@ int http_parse_request_line(struct http_request *req, const char *line,
         strcpy(req->method, "HEAD");
     } else {
         return 501;
+    }
+
+    /* '/'로 시작하는 경로만. 파일 경로를 "." + URI로 만들므로 "./x"를 받으면
+     * "../x"가 되어 루트 밖으로 나감. "http://..." 형식도 여기서 거절됨 */
+    if (req->uri[0] != '/') {
+        return 400;
     }
     return 0;
 }
@@ -202,6 +250,9 @@ int http_parse_header_line(struct http_request *req, const char *line,
     if (end == 0) {
         return 1; /* 빈 줄: 헤더 끝 */
     }
+    if (has_bad_bytes(line, end)) {
+        return 400;
+    }
 
     /* 원본 헤더 블록에 이어 붙임. 차면 그 자체가 헤더 전체 8 KiB 상한 */
     if (req->raw_len + len > sizeof(req->raw_headers)) {
@@ -237,7 +288,7 @@ int http_parse_header_line(struct http_request *req, const char *line,
 
     if (strcasecmp(name, "Host") == 0) {
         req->host_count++;
-        if (strlen(value) >= sizeof(req->host)) {
+        if (strlen(value) >= sizeof(req->host) || !host_is_valid(value)) {
             return 400;
         }
         strcpy(req->host, value);

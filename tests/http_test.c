@@ -5,6 +5,7 @@
 #include "acutest.h"
 #include "http.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -244,6 +245,77 @@ static void test_mime(void)
     TEST_CHECK(strcmp(http_mime_type("./dir.v2/README"), "text/plain") == 0);
 }
 
+/* NUL이 든 줄은 strlen으로 길이를 셀 수 없어 크기를 직접 넘김 */
+#define PARSE_HEADER_BYTES(req, s)                                             \
+    http_parse_header_line(req, s, sizeof(s) - 1, HTTP_LINE_MAX)
+
+static void test_nul_byte_is_rejected(void)
+{
+    struct http_request *req = new_request();
+    static const char line[] = "GET /home.html\0zzz HTTP/1.1\r\n";
+
+    TEST_CHECK(http_parse_request_line(req, line, sizeof(line) - 1,
+                                       HTTP_LINE_MAX) == 400);
+    http_request_init(req);
+    TEST_CHECK(PARSE_HEADER_BYTES(req, "Content-Length: 7\0abc\r\n") == 400);
+    TEST_CHECK(!req->has_content_length);
+    TEST_CHECK(req->raw_len == 0); /* 프록시가 넘길 원본에도 남지 않음 */
+    free(req);
+}
+
+static void test_cr_inside_line_is_rejected(void)
+{
+    struct http_request *req = new_request();
+
+    TEST_CHECK(parse_line(req, "GET /a\rb HTTP/1.1\r\n") == 400);
+    http_request_init(req);
+    TEST_CHECK(parse_header(req, "X-A: 1\rContent-Length: 5\r\n") == 400);
+    TEST_CHECK(req->raw_len == 0);
+    /* 줄바꿈이 \n 하나인 줄은 지금처럼 받음 */
+    TEST_CHECK(parse_header(req, "X-A: 1\n") == 0);
+    free(req);
+}
+
+static void test_uri_must_start_with_slash(void)
+{
+    struct http_request *req = new_request();
+
+    TEST_CHECK(parse_line(req, "GET ./secret.txt HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "GET home.html HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "GET http://a/ HTTP/1.1\r\n") == 400);
+    /* 모르는 메서드는 URI 형식과 상관없이 501 */
+    TEST_CHECK(parse_line(req, "OPTIONS * HTTP/1.1\r\n") == 501);
+    free(req);
+}
+
+static void test_host_format(void)
+{
+    static const char *const good[] = {"a",
+                                       "a:8000",
+                                       "my_host.example.com",
+                                       "127.0.0.1:80",
+                                       "[::1]",
+                                       "[::1]:80",
+                                       "a:",
+                                       ""};
+    static const char *const bad[] = {"a b",  "a/b", "a@b",    "a:80x", "a:b:c",
+                                      "[::1", "[]",  "[::1]x", "<x>",   "a\"b"};
+    struct http_request *req = new_request();
+    char line[64];
+
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        http_request_init(req);
+        snprintf(line, sizeof(line), "Host: %s\r\n", good[i]);
+        TEST_CHECK_(parse_header(req, line) == 0, "Host '%s'", good[i]);
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        http_request_init(req);
+        snprintf(line, sizeof(line), "Host: %s\r\n", bad[i]);
+        TEST_CHECK_(parse_header(req, line) == 400, "Host '%s'", bad[i]);
+    }
+    free(req);
+}
+
 TEST_LIST = {
     {"request_line_ok", test_request_line_ok},
     {"request_line_errors", test_request_line_errors},
@@ -255,4 +327,8 @@ TEST_LIST = {
     {"unknown_header_kept_in_raw_block", test_unknown_header_kept_in_raw_block},
     {"bad_header_lines", test_bad_header_lines},
     {"mime", test_mime},
+    {"NUL이 든 요청 줄과 헤더 줄은 400이다", test_nul_byte_is_rejected},
+    {"줄 중간에 CR이 있으면 400이다", test_cr_inside_line_is_rejected},
+    {"/로 시작하지 않는 URI는 400이다", test_uri_must_start_with_slash},
+    {"Host는 이름[:포트] 형식만 받고 나머지는 400이다", test_host_format},
     {NULL, NULL}};
