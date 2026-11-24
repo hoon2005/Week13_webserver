@@ -22,7 +22,8 @@
  *   Phase 2 M5-3: CGI 출력을 파이프로 모은 뒤 서버가 응답을 만듭니다(cgi.c).
  *   CGI가 실패하면 500, 10초 안에 안 끝나면 504, Content-Length는 서버가 셉니다.
  *   Phase 2 M5-4a: 연결 하나에서 요청을 여러 개 처리합니다(keep-alive, serve_connection).
- *   1단계라 본문 없는 정적 GET의 200만 연결을 유지하고, 나머지는 응답 뒤 닫습니다.
+ *   Phase 2 M5-4b: "요청을 끝까지 읽었고 응답 길이를 알면 유지" 규칙을 모든 응답에
+ *   적용합니다. 본문 경계를 모르는 오류(400, 413, 414, 417, 501, 505)만 닫습니다.
  *   사용법: ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
  */
@@ -63,12 +64,13 @@ static int file_check_executable(const struct stat *sbuf); /* doit에서 분리 
 /* M2: 정적 응답, 오류 응답 */
 static int static_file_serve(int fd, const char *filename, int filesize,
                              int head, int keep); /* serve_static 대신 */
-static void http_error_send(int fd, int head, int status, const char *cause,
-                            const char *longmsg); /* clienterror 대신 */
+static int http_error_send(int fd, int head, int keep, int status,
+                           const char *cause,
+                           const char *longmsg); /* clienterror 대신 */
 
 /* M3: CGI */
 static int cgi_serve(int fd, const char *filename, const char *cgiargs,
-                     const struct http_request *req);  /* serve_dynamic 대신 (부모 쪽) */
+                     const struct http_request *req, int keep); /* serve_dynamic 대신 (부모 쪽) */
 static int cgi_input_open(const struct http_request *req); /* [M5-2] CGI stdin 준비 */
 
 
@@ -493,9 +495,21 @@ static void serve_connection(int fd)
  *   → Content-Length만큼 읽기. 본문을 받지 않고 거절했으면 남은 바이트를 비우고 닫습니다.
  * [M5-4a] 이름을 doit → handle_request로 바꾸고, rio는 serve_connection에게 받습니다.
  *   반환값 CONN_KEEP / CONN_CLOSE / CONN_DEAD로 연결을 유지할지 알려 줍니다.
- *   1단계 규칙: 클라이언트가 유지를 원하고(HTTP/1.1, close 아님), 요청 수 상한 전이고,
- *   본문 없는 GET이 정적 파일 200을 받았을 때만 유지. 오류·HEAD·CGI는 닫음 (M5-4b에서 넓힘)
+ * [M5-4b] 규칙 전체 (final.md 5.2): 요청을 끝까지 읽었고 응답 길이를 알면 유지.
+ *   단, 클라이언트가 닫기를 원하거나(1.1 + close, 1.0 기본) 요청 수 상한에 닿으면 닫음.
+ *   본문 경계를 믿을 수 없는 오류(400, 413, 414, 417, 501, 505)는 닫음.
+ *   보내다 끊기면 바로 닫음 (CONN_DEAD).
  */
+/* 오류 응답을 보내고 연결을 어떻게 할지 돌려줌 */
+static int error_reply(int fd, int head, int keep, int status,
+                       const char *cause, const char *longmsg)
+{
+    if (http_error_send(fd, head, keep, status, cause, longmsg) < 0) {
+        return CONN_DEAD;
+    }
+    return keep ? CONN_KEEP : CONN_CLOSE;
+}
+
 static int handle_request(int fd, rio_t *rp, int can_keep)
 {
     struct http_request req; /* [M5-1] 요청 줄, 헤더 필드, 원본 헤더 블록 */
@@ -504,7 +518,8 @@ static int handle_request(int fd, rio_t *rp, int can_keep)
     int is_static;
     int status;
     int head;            /* HEAD 요청이면 1: 헤더는 GET과 같고 본문만 뺌 */
-    int result = CONN_CLOSE; /* 돌려줄 값. 유지할 응답에서만 CONN_KEEP으로 바꿈 */
+    int result = CONN_CLOSE; /* 돌려줄 값 */
+    int keep = 0; /* [M5-4b] 이 응답 뒤 연결을 유지할지. 요청을 끝까지 읽은 뒤에 정함 */
 
     /* 1. 요청 읽기: 요청 줄과 헤더를 파싱한다 (요청마다 구조체를 새로 비움) */
     http_request_init(&req);
@@ -514,7 +529,7 @@ static int handle_request(int fd, rio_t *rp, int can_keep)
     }
     head = strcmp(req.method, "HEAD") == 0;
     if (status > 0) { /* 형식 오류 400, 긴 요청 줄 414, 501, 505 */
-        http_error_send(fd, head, status, "request", request_error_msg(status));
+        result = error_reply(fd, head, keep, status, "request", request_error_msg(status));
         goto done;
     }
 
@@ -535,7 +550,7 @@ static int handle_request(int fd, rio_t *rp, int can_keep)
         status = 0;
     }
     if (status != 0) { /* 413, 417: 본문은 받지 않음 → done에서 남은 바이트를 비움 */
-        http_error_send(fd, head, status, "request body",
+        result = error_reply(fd, head, keep, status, "request body",
                         request_error_msg(status));
         goto done;
     }
@@ -548,15 +563,19 @@ static int handle_request(int fd, rio_t *rp, int can_keep)
         goto done;
     }
     if (status > 0) { /* 메모리 부족 500 */
-        http_error_send(fd, head, status, "request body",
+        result = error_reply(fd, head, keep, status, "request body",
                         "Tiny couldn't allocate the request body");
         goto done;
     }
-    /* 여기까지 왔으면 요청을 끝까지 읽었음 → 다음 바이트가 다음 요청 */
+    /* 여기까지 왔으면 요청을 끝까지 읽었음 → 다음 바이트가 다음 요청.
+     * [M5-4b] 이제부터 보내는 응답은 모두 길이(Content-Length)를 알므로, 클라이언트가
+     * 원하고(버전 + Connection) 요청 수 상한 전이면 유지 (final.md 5.2 한 줄 규칙).
+     * 이 위의 오류(400, 414, 501, 505, 413, 417)는 keep = 0 그대로라 닫힘 */
+    keep = can_keep && req.keep_alive;
 
     /* 2. URI 확인: 폴더 밖으로 나가는 ..이 있으면 403 */
     if (uri_check(req.uri) != 0) {
-        http_error_send(fd, head, 403, req.uri,
+        result = error_reply(fd, head, keep, 403, req.uri,
                         "Tiny doesn't serve files outside its folder");
         goto done;
     }
@@ -566,7 +585,7 @@ static int handle_request(int fd, rio_t *rp, int can_keep)
     /* [안정성 수정] 경로가 버퍼보다 길어 잘렸으면, 잘린 경로로 엉뚱한 파일을
      * 찾지 않도록 파일 조회 전에 414를 보내고 끝냄 */
     if (is_static < 0) {
-        http_error_send(fd, head, 414, req.uri,
+        result = error_reply(fd, head, keep, 414, req.uri,
                         "Tiny couldn't handle such a long path");
         goto done;
     }
@@ -574,55 +593,52 @@ static int handle_request(int fd, rio_t *rp, int can_keep)
     /* 4. 메서드 확인: 정적/동적에 따라 지원하는 메서드가 다름 (Phase 1처럼 파일 찾기 전) */
     if (is_static && strcmp(req.method, "POST") == 0) {
         /* 정적 파일 POST는 Phase 1처럼 501 유지 (final.md 6장) */
-        http_error_send(fd, head, 501, req.method,
+        result = error_reply(fd, head, keep, 501, req.method,
                         "Tiny does not implement POST for static files");
         goto done;
     }
     if (!is_static && head) { /* CGI HEAD는 범위 밖 (final.md 3.8) */
-        http_error_send(fd, head, 501, req.method,
+        result = error_reply(fd, head, keep, 501, req.method,
                         "Tiny does not implement HEAD for CGI programs");
         goto done;
     }
 
     /* 5. 파일 찾기: 없으면 404 */
     if (file_find(filename, &sbuf) != 0) {
-        http_error_send(fd, head, 404, filename, "Tiny couldn't find this file");
+        result = error_reply(fd, head, keep, 404, filename, "Tiny couldn't find this file");
         goto done;
     }
 
     /* 6. 응답 분기: 권한을 확인하고 정적 / 동적 처리로 보낸다 */
     if (is_static) {
         if (file_check_readable(&sbuf) != 0) {
-            http_error_send(fd, head, 403, filename, "Tiny couldn't read the file");
+            result = error_reply(fd, head, keep, 403, filename, "Tiny couldn't read the file");
             goto done;
         }
-        /* [M5-4a] 유지 여부를 응답 헤더(Connection)에 써야 하므로 보내기 전에 정함 */
-        int keep = can_keep && req.keep_alive && req.minor == 1 &&
-                   strcmp(req.method, "GET") == 0 && req.body_len == 0;
-
         status = static_file_serve(fd, filename, sbuf.st_size, head, keep);
         if (status > 0) { /* 파일 준비 실패: 아직 아무것도 안 보냈으므로 500 */
-            http_error_send(fd, head, status, filename,
-                            "Tiny couldn't open the file");
-        } else if (status < 0) { /* 보내다 끊김 */
-            result = CONN_DEAD;
-        } else if (keep) {
-            result = CONN_KEEP;
+            result = error_reply(fd, head, keep, status, filename,
+                                 "Tiny couldn't open the file");
+        } else {
+            result = status < 0 ? CONN_DEAD : keep ? CONN_KEEP : CONN_CLOSE;
         }
     } else {
         if (file_check_executable(&sbuf) != 0) {
-            http_error_send(fd, head, 403, filename,
+            result = error_reply(fd, head, keep, 403, filename,
                             "Tiny couldn't run the CGI program");
             goto done;
         }
-        status = cgi_serve(fd, filename, cgiargs, &req); /* serve_dynamic 대신 */
-        /* [M5-3] 출력을 모은 뒤 응답하므로, 실패해도 아직 아무것도 안 보냈음 */
+        status = cgi_serve(fd, filename, cgiargs, &req, keep); /* serve_dynamic 대신 */
+        /* [M5-3] 출력을 모은 뒤 응답하므로, 실패해도 아직 아무것도 안 보냈음.
+         * [M5-4b] CGI 실패(500)·시간 초과(504)도 요청은 다 읽었으므로 유지할 수 있음 */
         if (status == 504) {
-            http_error_send(fd, head, 504, filename,
-                            "The CGI program didn't finish in time");
-        } else if (status != 0) {
-            http_error_send(fd, head, status, filename,
-                            "The CGI program failed");
+            result = error_reply(fd, head, keep, 504, filename,
+                                 "The CGI program didn't finish in time");
+        } else if (status > 0) {
+            result = error_reply(fd, head, keep, status, filename,
+                                 "The CGI program failed");
+        } else {
+            result = status < 0 ? CONN_DEAD : keep ? CONN_KEEP : CONN_CLOSE;
         }
     }
 
@@ -898,9 +914,10 @@ static int static_file_serve(int fd, const char *filename, int filesize,
  * [M5-1] 상태 줄은 HTTP/1.1, 이유 문구는 http_status_text가 정합니다.
  *   클라이언트가 응답 끝을 알 수 있게 Content-Length와 Connection을 넣습니다.
  *   HEAD 요청이면 헤더(Content-Length 포함)만 보내고 본문은 뺍니다.
+ * [M5-4b] keep이면 Connection: keep-alive. 반환: 0(다 보냄), -1(보내다 끊김)
  */
-static void http_error_send(int fd, int head, int status, const char *cause,
-                            const char *longmsg)
+static int http_error_send(int fd, int head, int keep, int status,
+                           const char *cause, const char *longmsg)
 {
     char header[MAXLINE]; /* Tiny는 buf 하나를 헤더 줄마다 다시 썼음 → 헤더용 버퍼 따로 */
     char body[MAXBUF];
@@ -926,17 +943,21 @@ static void http_error_send(int fd, int head, int status, const char *cause,
     header_len = snprintf(header, sizeof(header),
                           "HTTP/1.1 %d %s\r\n"
                           "Server: Tiny Web Server\r\n"
-                          "Connection: close\r\n"
+                          "Connection: %s\r\n"
                           "Content-Length: %d\r\n"
                           "Content-Type: text/html\r\n\r\n",
-                          status, shortmsg, body_len);
+                          status, shortmsg, keep ? "keep-alive" : "close",
+                          body_len);
 
     /* [안정성 수정] Rio_writen(대문자)은 쓰기 실패 시 exit함 → rio_writen.
      * 헤더 쓰기가 실패하면(클라이언트가 끊음) 본문은 보내지 않음 */
-    if (rio_writen(fd, header, header_len) != header_len || head) {
-        return;
+    if (rio_writen(fd, header, header_len) != header_len) {
+        return -1;
     }
-    rio_writen(fd, body, body_len); /* 실패해도 이 요청만 끝남 */
+    if (head) {
+        return 0;
+    }
+    return rio_writen(fd, body, body_len) == body_len ? 0 : -1;
 }
 
 /* ============================== M3 CGI GET ============================== */
@@ -951,12 +972,14 @@ static void http_error_send(int fd, int head, int status, const char *cause,
  *     - 응답이 어디서 끝나는지 서버가 몰라 keep-alive를 할 수 없음
  *   지금: 입력 준비 → cgi_run(출력을 파이프로 끝까지 모음, 1 MiB·10초 상한)
  *         → cgi_response_build(헤더/본문 나누기, 서버가 길이를 셈) → 한 번에 보냄
- * 반환: 0(보냈거나 보내다 끊김), 500(입력 준비·실행 실패, 출력 이상), 504(시간 초과).
- * 0이 아니면 아직 아무것도 보내지 않았으므로 doit이 오류 응답을 보냅니다.
+ * 반환: 0(다 보냄), -1(보내다 끊김), 500(입력 준비·실행 실패, 출력 이상), 504(시간 초과).
+ * 500·504면 아직 아무것도 보내지 않았으므로 handle_request가 오류 응답을 보냅니다.
+ * [M5-4b] keep이면 응답에 Connection: keep-alive (서버가 길이를 세므로 가능)
  */
 static int cgi_serve(int fd, const char *filename, const char *cgiargs,
-                     const struct http_request *req)
+                     const struct http_request *req, int keep)
 {
+    int result = 0;
     char header[MAXBUF];
     /* [M4-3] CGI에 넘길 환경 변수를 fork 전에 부모가 만들어 둠 (cgi.c의 child_exec 설명).
      * 스택 배열이라 malloc이 없고, 자식은 fork로 복사된 이 배열을 그대로 execve에 넘김.
@@ -1009,20 +1032,21 @@ static int cgi_serve(int fd, const char *filename, const char *cgiargs,
         return status;
     }
 
-    /* [M5-3] 출력 해석: Status 반영, CGI의 Content-Length·Connection은 버림.
-     * keep-alive는 M5-4b에서 켬 (지금은 항상 close) */
-    if (cgi_response_build(out.data, out.len, 0, header, sizeof(header), &code,
+    /* [M5-3] 출력 해석: Status 반영, CGI의 Content-Length·Connection은 버림 */
+    if (cgi_response_build(out.data, out.len, keep, header, sizeof(header), &code,
                            &body, &body_len) != 0) {
         cgi_output_free(&out);
         return 500;
     }
     /* [안정성 수정] Rio_writen 대신 rio_writen. 헤더를 다 보냈을 때만 본문 */
-    if (rio_writen(fd, header, strlen(header)) == (ssize_t)strlen(header) &&
-        body_len > 0) {
-        rio_writen(fd, (void *)body, body_len); /* 실패해도 이 요청만 끝남 */
+    if (rio_writen(fd, header, strlen(header)) != (ssize_t)strlen(header)) {
+        result = -1;
+    } else if (body_len > 0 &&
+               rio_writen(fd, (void *)body, body_len) != (ssize_t)body_len) {
+        result = -1;
     }
     cgi_output_free(&out);
-    return 0;
+    return result;
 }
 
 /*

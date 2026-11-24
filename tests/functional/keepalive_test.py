@@ -1,11 +1,12 @@
-"""M5-4a keep-alive 기능 테스트입니다.
+"""M5-4a·M5-4b keep-alive 기능 테스트입니다.
 
 사용법: python3 keepalive_test.py <build 폴더>
 
 서버를 --keepalive-max 3 --timeout 2로 띄웁니다. 요청 수 상한과 idle 타임아웃을
 짧은 시간 안에 확인하기 위해서입니다 (기본값은 100건, 5초).
 한 연결에서 응답을 여러 개 받아야 하므로, 닫힐 때까지 읽지 않고 Content-Length만큼만
-읽습니다. 1단계(M5-4a)는 본문 없는 정적 GET의 200만 연결을 유지합니다.
+읽습니다. M5-4b부터는 요청을 끝까지 읽은 응답은 모두 유지하고, 본문 경계를 모르는
+오류(400, 413, 414, 417, 501, 505)만 닫습니다 (final.md 5.2).
 엣지 케이스 ID는 docs/plan/phase2-edge-cases-http.md의 K 구분입니다.
 """
 
@@ -177,22 +178,83 @@ class KeepAliveTest(unittest.TestCase):
         self.assertGreater(elapsed, IDLE_TIMEOUT - 0.5)
         self.assertLess(elapsed, IDLE_TIMEOUT + 2)
 
-    def test_other_responses_close_in_stage1(self):  # M5-4a 범위: 정적 GET 200만 유지
-        for req in (
-            b"GET /nope.html HTTP/1.1\r\nHost: x\r\n\r\n",          # 404
-            b"HEAD /home.html HTTP/1.1\r\nHost: x\r\n\r\n",          # HEAD
-            b"GET /cgi-bin/adder?1&2 HTTP/1.1\r\nHost: x\r\n\r\n",   # CGI
-            b"GET /home.html HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nab",  # 본문 있음
+    # ---------- M5-4b: 요청을 끝까지 읽었고 응답 길이를 알면 유지 ----------
+
+    def test_kept_responses_then_next_request(self):  # E-K10, E-K11, final.md 5.2 유지 줄
+        for req, status in (
+            (b"GET /nope.html HTTP/1.1\r\nHost: x\r\n\r\n", 404),
+            (b"GET /../x HTTP/1.1\r\nHost: x\r\n\r\n", 403),
+            (b"HEAD /home.html HTTP/1.1\r\nHost: x\r\n\r\n", 200),
+            (b"GET /cgi-bin/adder?1&2 HTTP/1.1\r\nHost: x\r\n\r\n", 200),
+            (b"GET /cgi-bin/fail HTTP/1.1\r\nHost: x\r\n\r\n", 500),
+            (b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\na=1&b=2", 200),
+            (b"GET /home.html HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nab", 200),  # E-B11
+            (b"POST /home.html HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n", 501),
+            (b"HEAD /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n\r\n", 501),
         ):
             with self.subTest(req=req.split(b"\r\n")[0]):
                 conn = Conn(self.port)
                 try:
                     conn.send(req)
                     resp = conn.read_response(head_request=req.startswith(b"HEAD"))
+                    self.assertEqual(resp.status, status)
+                    self.assertEqual(resp.headers.get("connection"), "keep-alive")
+                    conn.send(GET_HOME)  # 같은 연결로 다음 요청
+                    self.assertEqual(conn.read_response().status, 200)
+                finally:
+                    conn.close()
+
+    def test_cgi_twice_same_connection(self):  # E-K10
+        for a, b in ((1, 2), (3, 4)):
+            self.conn.send(b"GET /cgi-bin/adder?%d&%d HTTP/1.1\r\nHost: x\r\n\r\n" % (a, b))
+            resp = self.conn.read_response()
+            self.assertIn(b"%d + %d = %d" % (a, b, a + b), resp.body)
+            self.assertEqual(resp.headers.get("connection"), "keep-alive")
+
+    def test_errors_without_body_boundary_close(self):  # final.md 5.2 닫기 줄
+        for req, status in (
+            (b"GET / HTTP/1.1\r\n\r\n", 400),                                        # Host 없음
+            (b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n", 400),
+            (b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nContent-Length: 2000000\r\n\r\n", 413),
+            (b"GET /" + b"a" * 10000 + b" HTTP/1.1\r\nHost: x\r\n\r\n", 414),
+            (b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nExpect: foo\r\n\r\nx", 417),
+            (b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", 501),
+            (b"FOO / HTTP/1.1\r\nHost: x\r\n\r\n", 501),
+            (b"GET / HTTP/2.0\r\nHost: x\r\n\r\n", 505),
+        ):
+            with self.subTest(status=status, req=req[:40]):
+                conn = Conn(self.port)
+                try:
+                    conn.send(req)
+                    resp = conn.read_response()
+                    self.assertEqual(resp.status, status)
                     self.assertEqual(resp.headers.get("connection"), "close")
                     self.assertTrue(conn.closed_by_server())
                 finally:
                     conn.close()
+
+    def test_request_after_bad_content_length_not_processed(self):  # E-K9
+        self.conn.send(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n" + GET_HOME)
+        resp = self.conn.read_response()
+        self.assertEqual(resp.status, 400)
+        self.assertTrue(self.conn.closed_by_server())  # 뒤 요청의 응답은 오지 않음
+
+    def test_http10_keep_alive(self):  # E-K4
+        for _ in range(2):
+            self.conn.send(b"GET /home.html HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+            resp = self.conn.read_response()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers.get("connection"), "keep-alive")
+
+    def test_expect_twice_same_connection(self):  # E-K16
+        for _ in range(2):
+            self.conn.send(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n"
+                           b"Expect: 100-continue\r\n\r\n")
+            self.assertEqual(self.conn.read_response().status, 100)  # 100 Continue (본문 없음)
+            self.conn.send(b"a=1&b=2")
+            resp = self.conn.read_response()
+            self.assertEqual(resp.status, 200)
+            self.assertIn(b"1 + 2 = 3", resp.body)
 
     def test_client_closes_quietly(self):  # E-K8
         self.conn.send(GET_HOME)

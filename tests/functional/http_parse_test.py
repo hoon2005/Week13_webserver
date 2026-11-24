@@ -7,8 +7,9 @@ baseline_test.py처럼 임시 폴더에 tests/fixtures/www/와 build/adder를 �
 넘긴다는 것입니다. 그래서 --root가 동작해야 모든 테스트가 통과합니다.
 
 http.client는 잘못된 요청을 보내지 못하므로 소켓에 요청 바이트를 그대로 씁니다.
-닫힐 때까지 읽어 응답 하나를 받으므로, M5-4a부터 연결을 유지할 수 있는 요청
-(HTTP/1.1 정적 GET)에는 "Connection: close"를 붙여 서버가 응답 뒤 닫게 합니다.
+닫힐 때까지 읽어 응답 하나를 받으므로, 연결이 유지될 수 있는 요청(M5-4b부터
+요청을 끝까지 읽은 HTTP/1.1 요청 전부)에는 "Connection: close"를 붙여 서버가 응답
+뒤 닫게 합니다. 오류로 닫히는 요청(400, 413 등)은 붙이지 않습니다.
 keep-alive 자체는 keepalive_test.py에서 확인합니다. 엣지 케이스 ID는 docs/plan/phase2-edge-cases-http.md 기준입니다.
 """
 
@@ -267,7 +268,7 @@ class HttpParseTest(unittest.TestCase):
 
     def post(self, path, body, extra=b"", version=b"HTTP/1.1"):
         return self.send_raw(
-            b"POST " + path.encode() + b" " + version + b"\r\nHost: x\r\n"
+            b"POST " + path.encode() + b" " + version + b"\r\nHost: x\r\nConnection: close\r\n"
             + b"Content-Length: %d\r\n" % len(body) + extra + b"\r\n" + body
         )
 
@@ -282,7 +283,7 @@ class HttpParseTest(unittest.TestCase):
         self.assertIn(b"10 + -4 = 6", resp.body)
 
     def test_post_without_content_length(self):  # E-B1
-        resp = self.send_raw(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n\r\n")
+        resp = self.send_raw(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         self.assertEqual(resp.status, 200)
         self.assertIn(b"Give two numbers", resp.body)
 
@@ -327,7 +328,7 @@ class HttpParseTest(unittest.TestCase):
     def test_cgi_timeout_504(self):  # E-G11, E-P3 (약 10초 걸림)
         start = time.monotonic()
         # 서버의 CGI 상한(10초)보다 길게 기다려야 504를 받음
-        resp = self.send_raw(b"GET /cgi-bin/slow HTTP/1.1\r\nHost: x\r\n\r\n", timeout=20)
+        resp = self.send_raw(b"GET /cgi-bin/slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", timeout=20)
         elapsed = time.monotonic() - start
         self.assertEqual(resp.status, 504)
         self.assert_framed(resp)
@@ -337,7 +338,7 @@ class HttpParseTest(unittest.TestCase):
 
     def test_expect_100_continue(self):  # E-X1
         with socket.create_connection((HOST, self.port), timeout=REQUEST_TIMEOUT_SEC) as s:
-            s.sendall(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+            s.sendall(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
                       b"Content-Length: 7\r\nExpect: 100-continue\r\n\r\n")
             s.settimeout(0.5)  # 100이 오지 않으면 curl처럼 기다리게 됨 → 바로 와야 함
             first = s.recv(1024)
@@ -371,7 +372,7 @@ class HttpParseTest(unittest.TestCase):
     def test_exactly_limit_is_accepted(self):  # E-B14
         body = b"a" * (1 << 20)
         with socket.create_connection((HOST, self.port), timeout=REQUEST_TIMEOUT_SEC) as s:
-            s.sendall(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+            s.sendall(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
                       b"Content-Length: %d\r\n\r\n" % len(body))
             s.sendall(body)
             raw = b""
@@ -401,7 +402,7 @@ class HttpParseTest(unittest.TestCase):
         self.assertEqual(self.get("/home.html").status, 200)
 
     def test_get_with_body_is_read_and_ignored(self):  # E-B11
-        resp = self.send_raw(b"GET /home.html HTTP/1.1\r\nHost: x\r\n"
+        resp = self.send_raw(b"GET /home.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
                              b"Content-Length: 5\r\n\r\nhello")
         self.assertEqual(resp.status, 200)
 
