@@ -539,8 +539,17 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
 
 /* ============================== M2: 경로 확인 (Phase 1에서 이어짐) ============================== */
 
-static int uri_has_dot_dot(const char *path, size_t len);
-static int uri_parse(const char *uri, char *filename, char *cgiargs);
+/* URI가 가리키는 것 (uri_parse의 결과) */
+enum uri_target {
+    URI_STATIC,    /* 정적 파일 */
+    URI_CGI,       /* CGI 프로그램 */
+    URI_FORBIDDEN, /* 허용하지 않는 경로 → 403 */
+    URI_TOO_LONG   /* 파일 경로가 버퍼보다 김 → 414 */
+};
+
+static int path_is_allowed(const char *path, size_t len);
+static enum uri_target uri_parse(const char *uri, char *filename,
+                                 char *cgiargs);
 static int static_serve(int fd, const struct http_request *req,
                         const char *filename, off_t filesize, int *keep);
 static int cgi_serve(int fd, const struct http_request *req,
@@ -550,20 +559,14 @@ static int cgi_serve(int fd, const struct http_request *req,
 static int request_route(int fd, struct http_request *req, int *keep)
 {
     char filename[MAXLINE], cgiargs[MAXLINE];
-    const char *question = strchr(req->uri, '?');
-    size_t path_len = question ? (size_t)(question - req->uri)
-                               : strlen(req->uri);
     struct stat sbuf;
-    int is_static;
+    enum uri_target target = uri_parse(req->uri, filename, cgiargs);
 
-    /* 폴더 밖으로 나가는 ".." 경로 조각 → 403 (Phase 1) */
-    if (uri_has_dot_dot(req->uri, path_len)) {
+    if (target == URI_FORBIDDEN) {
         return error_reply(fd, req, 403, req->uri,
-                           "Tiny doesn't serve files outside its folder",
-                           keep);
+                           "Tiny doesn't serve this path", keep);
     }
-    is_static = uri_parse(req->uri, filename, cgiargs);
-    if (is_static < 0) {
+    if (target == URI_TOO_LONG) {
         *keep = 0;
         return error_reply(fd, req, 414, req->uri, "Path too long", keep);
     }
@@ -572,7 +575,7 @@ static int request_route(int fd, struct http_request *req, int *keep)
                            "Tiny couldn't find this file", keep);
     }
 
-    if (is_static) {
+    if (target == URI_STATIC) {
         if (strcmp(req->method, "POST") == 0) { /* 정적 파일 POST: 501 유지 */
             return error_reply(fd, req, 501, req->method,
                                "Tiny does not implement this method", keep);
@@ -595,51 +598,64 @@ static int request_route(int fd, struct http_request *req, int *keep)
     return cgi_serve(fd, req, filename, cgiargs, keep);
 }
 
-/* path 앞 len 글자를 '/'로 나눈 조각 중 정확히 ".."이 있으면 1 (Phase 1) */
-static int uri_has_dot_dot(const char *path, size_t len)
+/*
+ * 경로(쿼리 제외)를 '/'로 나눈 조각을 검사합니다. 로컬 파일로 찾을 때만 씁니다.
+ *   "..": 루트 밖으로 나감
+ *   "."과 중간의 빈 조각("//"): "/./cgi-bin/x"처럼 첫 조각이 cgi-bin이 아닌 척
+ *     하면 CGI 프로그램 파일이 정적 파일로 내려감
+ *   끝의 '/'는 허용 (기본 파일 home.html)
+ * URL 표기만 봅니다. 루트 안의 심볼릭 링크가 어디를 가리키는지는 보지 않습니다.
+ */
+static int path_is_allowed(const char *path, size_t len)
 {
-    size_t start = 0;
+    size_t start = 1; /* path[0]은 '/' */
 
-    for (size_t i = 0; i <= len; i++) {
-        if (i == len || path[i] == '/') {
-            if (i - start == 2 && path[start] == '.' &&
-                path[start + 1] == '.') {
-                return 1;
-            }
-            start = i + 1;
+    for (size_t i = 1; i <= len; i++) {
+        if (i < len && path[i] != '/') {
+            continue;
         }
+        size_t seg = i - start;
+        if ((seg == 0 && i < len) || (seg == 1 && path[start] == '.') ||
+            (seg == 2 && path[start] == '.' && path[start + 1] == '.')) {
+            return 0;
+        }
+        start = i + 1;
     }
-    return 0;
+    return 1;
 }
 
 /*
- * URI를 정적/동적으로 나누고 파일 경로와 CGI 인자를 만듭니다 (Phase 1 규칙).
- * 정적 1, 동적 0, 경로가 버퍼보다 길면 -1. URI는 바꾸지 않음 (로그에 원본 유지).
+ * URI에서 쿼리를 떼고 정적/CGI로 나눈 뒤 파일 경로와 CGI 인자를 만듭니다.
+ *   첫 조각이 정확히 "cgi-bin"이면 CGI. 대소문자만 다르면 거절 (대소문자를
+ *   구분하지 않는 macOS 파일 시스템에서 프로그램 파일이 내려가는 것을 막음).
+ *   URI는 바꾸지 않음 (로그에 원본 유지).
  */
-static int uri_parse(const char *uri, char *filename, char *cgiargs)
+static enum uri_target uri_parse(const char *uri, char *filename,
+                                 char *cgiargs)
 {
-    const char *question;
-    size_t path_len;
+    size_t path_len = strcspn(uri, "?");
+    size_t first_len = strcspn(uri + 1, "/?");
+    const char *suffix = "";
+    enum uri_target target = URI_STATIC;
     int n;
 
-    if (!strstr(uri, "cgi-bin")) {
-        cgiargs[0] = '\0';
-        n = snprintf(filename, MAXLINE, ".%s%s", uri,
-                     uri[strlen(uri) - 1] == '/' ? "home.html" : "");
-        return (n < 0 || n >= MAXLINE) ? -1 : 1;
+    cgiargs[0] = '\0';
+    if (!path_is_allowed(uri, path_len)) {
+        return URI_FORBIDDEN;
     }
-    question = strchr(uri, '?');
-    path_len = question ? (size_t)(question - uri) : strlen(uri);
-    if (question) {
-        n = snprintf(cgiargs, MAXLINE, "%s", question + 1);
-        if (n < 0 || n >= MAXLINE) {
-            return -1;
+    if (first_len == 7 && strncasecmp(uri + 1, "cgi-bin", 7) == 0) {
+        if (strncmp(uri + 1, "cgi-bin", 7) != 0) {
+            return URI_FORBIDDEN;
         }
-    } else {
-        cgiargs[0] = '\0';
+        target = URI_CGI;
+        if (uri[path_len] == '?') {
+            snprintf(cgiargs, MAXLINE, "%s", uri + path_len + 1);
+        }
+    } else if (uri[path_len - 1] == '/') {
+        suffix = "home.html";
     }
-    n = snprintf(filename, MAXLINE, ".%.*s", (int)path_len, uri);
-    return (n < 0 || n >= MAXLINE) ? -1 : 0;
+    n = snprintf(filename, MAXLINE, ".%.*s%s", (int)path_len, uri, suffix);
+    return (n < 0 || n >= MAXLINE) ? URI_TOO_LONG : target;
 }
 
 /*

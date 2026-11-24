@@ -10,7 +10,7 @@ import sys
 import time
 import unittest
 
-from phase2_test import Server, exchange, read_response
+from phase2_test import Server, exchange, get, read_response
 
 
 class RequestCheckTest(unittest.TestCase):
@@ -103,6 +103,59 @@ class KeepAliveDelayTest(unittest.TestCase):
                     self.assertLess(keep_ms, close_ms + 25)
         finally:
             server.stop()
+
+
+class PathTest(unittest.TestCase):
+    """C2·C3: 쿼리를 떼고 경로 조각으로 판정한다"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server("--timeout", "1")
+        os.makedirs(os.path.join(cls.server.www, "sub", "cgi-bin"))
+        with open(os.path.join(cls.server.www, "sub", "cgi-bin", "x"), "w") as f:
+            f.write("not executed")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_정적_파일에_쿼리가_붙어도_같은_파일을_준다(self):
+        for path in ("/style.css?v=1", "/home.html?x=cgi-bin", "/?a=b/c"):
+            with self.subTest(path=path):
+                self.assertEqual(get(self.server, path)[0], 200)
+
+    def test_쿼리_속의_점_두_개는_경로로_보지_않는다(self):
+        self.assertEqual(get(self.server, "/home.html?p=/../x")[0], 200)
+
+    def test_CGI_쿼리는_프로그램에_그대로_전달된다(self):
+        status, _, body, _ = get(self.server, "/cgi-bin/adder?3&4")
+        self.assertEqual(status, 200)
+        self.assertIn(b"3 + 4 = 7", body)
+
+    def test_점_조각과_빈_조각으로_CGI_파일을_내려받을_수_없다(self):
+        for path in (
+            "//cgi-bin/adder", "/./cgi-bin/adder", "/a/../cgi-bin/adder",
+            "/cgi-bin/./adder", "/cgi-bin//adder", "/CGI-BIN/adder",
+            "//style.css", "/./style.css", "/..", "/a/.",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(get(self.server, path)[0], 403)
+
+    def test_점으로_시작하는_파일_이름은_점_조각이_아니다(self):
+        # 파일이 없어서 404. 403이면 이름을 조각 전체로 잘못 본 것
+        for path in ("/.hidden", "/..a", "/a."):
+            with self.subTest(path=path):
+                self.assertEqual(get(self.server, path)[0], 404)
+
+    def test_첫_조각이_아닌_cgi_bin은_정적_폴더다(self):
+        status, _, body, _ = get(self.server, "/sub/cgi-bin/x")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"not executed")
+
+    def test_cgi_bin_폴더_자체는_403이다(self):
+        for path in ("/cgi-bin", "/cgi-bin/"):
+            with self.subTest(path=path):
+                self.assertEqual(get(self.server, path)[0], 403)
 
 
 if __name__ == "__main__":
