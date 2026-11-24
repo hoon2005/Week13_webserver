@@ -112,7 +112,8 @@ static int listen_socket_open(const char *port);
 static int accept_cloexec(int listenfd);
 static void socket_timeouts_set(int connfd);
 static void *worker_main(void *arg);
-static void serve_connection(int connfd);
+static int serve_connection(int connfd);
+static void connection_close_lingering(int connfd);
 
 int main(int argc, char **argv)
 {
@@ -199,7 +200,9 @@ static void *worker_main(void *arg)
     int connfd;
 
     while ((connfd = conn_queue_pop(queue)) >= 0) {
-        serve_connection(connfd);
+        if (serve_connection(connfd)) {
+            connection_close_lingering(connfd); /* 응답을 보내고 닫는 경우 */
+        }
         close(connfd);
     }
     return NULL;
@@ -362,6 +365,14 @@ static void request_log(const struct http_request *req, int status)
 
 /* ============================== M5: 연결과 요청 처리 ============================== */
 
+/* request_handle의 결과: 연결을 어떻게 할지 */
+enum conn_next {
+    CONN_CLOSE_SILENT = 0, /* 응답 없이 닫음 (끊김, 타임아웃) */
+    CONN_KEEP = 1,         /* 다음 요청을 기다림 */
+    CONN_CLOSE_REPLIED = 2 /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
+};
+
+static long now_ms(void);
 static int request_handle(int fd, rio_t *rio, int can_keep);
 static int request_route(int fd, struct http_request *req, int *keep);
 
@@ -371,20 +382,69 @@ static int request_route(int fd, struct http_request *req, int *keep);
  *   rio 버퍼에 들어와 있을 수 있어서, 요청마다 새로 만들면 그 데이터를 잃음.
  *   이 연결의 요청 수가 --keepalive-max에 닿으면 그 응답에 Connection: close.
  */
-static void serve_connection(int connfd)
+static int serve_connection(int connfd)
 {
     rio_t rio;
+    int next;
 
     rio_readinitb(&rio, connfd);
     for (int n = 1;; n++) {
-        if (!request_handle(connfd, &rio, n < cfg.keepalive_max)) {
+        next = request_handle(connfd, &rio, n < cfg.keepalive_max);
+        if (next != CONN_KEEP) {
             break;
         }
+    }
+    return next == CONN_CLOSE_REPLIED; /* 1이면 닫기 전에 남은 데이터를 비움 */
+}
+
+/*
+ * 응답을 보낸 뒤 연결을 닫을 때, 클라이언트가 보낸 데이터 중 서버가 읽지 않은
+ * 부분이 소켓에 남아 있으면(아주 긴 요청 줄, 오류 뒤에 이어 보낸 요청 등)
+ * close가 FIN 대신 RST를 보냅니다. 그러면 클라이언트가 방금 보낸 오류 응답을
+ * 읽기 전에 연결이 끊겨 응답을 잃을 수 있습니다 (macOS CI에서 414가 이렇게 실패).
+ *
+ * 그래서 먼저 shutdown(SHUT_WR)으로 "더 보낼 것 없음(FIN)"을 알리고,
+ * 클라이언트가 닫을 때까지(EOF) 남은 데이터를 읽어 버린 뒤 닫습니다.
+ * 상대가 계속 보내거나 닫지 않아도 최대 1초, 1 MiB까지만 기다립니다.
+ */
+static void connection_close_lingering(int connfd)
+{
+    char buf[4096];
+    long deadline = now_ms() + 1000;
+    size_t drained = 0;
+
+    if (shutdown(connfd, SHUT_WR) < 0) {
+        return;
+    }
+    while (drained < (size_t)BODY_MAX) {
+        long left = deadline - now_ms();
+        struct pollfd p = {connfd, POLLIN, 0};
+        ssize_t n;
+        int r;
+
+        if (left <= 0) {
+            break;
+        }
+        r = poll(&p, 1, (int)left);
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        if (r <= 0) {
+            break;
+        }
+        n = read(connfd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            break; /* 클라이언트가 닫음(EOF) 또는 오류 */
+        }
+        drained += (size_t)n;
     }
 }
 
 /*
- * 요청 하나를 읽고 응답합니다. 연결을 유지하면 1, 닫으면 0.
+ * 요청 하나를 읽고 응답합니다. 반환은 enum conn_next.
  * 한 줄 규칙: 요청을 끝까지 읽었고 응답 길이를 알면 유지, 아니면 닫음 (5.2)
  */
 static int request_handle(int fd, rio_t *rio, int can_keep)
@@ -401,21 +461,21 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     /* 1. 요청 줄. 0(클라이언트가 끊음)이나 -1(읽기 타임아웃)이면 조용히 닫음 */
     n = rio_readlineb(rio, line, MAXLINE);
     if (n <= 0) {
-        return 0;
+        return CONN_CLOSE_SILENT;
     }
     status = http_parse_request_line(&req, line, (size_t)n, MAXLINE);
     if (status != 0) { /* 414, 400, 505, 501: 본문 경계를 모르므로 닫음 */
         error_reply(fd, &req, status, "request line", "Bad request line",
                     &keep);
         request_log(&req, status);
-        return 0;
+        return CONN_CLOSE_REPLIED;
     }
 
     /* 2. 헤더: 빈 줄까지 "이름: 값" → 구조체 + 원본 블록 */
     while (1) {
         n = rio_readlineb(rio, line, MAXLINE);
         if (n <= 0) {
-            return 0; /* 헤더 도중 끊김, 타임아웃 */
+            return CONN_CLOSE_SILENT; /* 헤더 도중 끊김, 타임아웃 */
         }
         status = http_parse_header_line(&req, line, (size_t)n, MAXLINE);
         if (status == 1) {
@@ -424,7 +484,7 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
         if (status != 0) {
             error_reply(fd, &req, status, "header", "Bad header", &keep);
             request_log(&req, status);
-            return 0;
+            return CONN_CLOSE_REPLIED;
         }
     }
 
@@ -433,7 +493,7 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     if (status != 0) {
         error_reply(fd, &req, status, req.uri, "Request rejected", &keep);
         request_log(&req, status);
-        return 0;
+        return CONN_CLOSE_REPLIED;
     }
     keep = req.keep_alive && can_keep;
     body_len = http_body_length(&req);
@@ -442,7 +502,7 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     if (req.expect == HTTP_EXPECT_CONTINUE && body_len > 0) {
         static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
         if (write_all(fd, cont, sizeof(cont) - 1) < 0) {
-            return 0;
+            return CONN_CLOSE_SILENT;
         }
     }
 
@@ -453,12 +513,12 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
             keep = 0;
             error_reply(fd, &req, 500, req.uri, "Out of memory", &keep);
             request_log(&req, 500);
-            return 0;
+            return CONN_CLOSE_REPLIED;
         }
         n = rio_readnb(rio, req.body, (size_t)body_len);
         if (n != (ssize_t)body_len) { /* 도중에 끊김, 타임아웃: 응답 없이 닫음 */
             http_request_free(&req);
-            return 0;
+            return CONN_CLOSE_SILENT;
         }
         req.body_len = (size_t)body_len;
     }
@@ -467,7 +527,7 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     status = request_route(fd, &req, &keep);
     request_log(&req, status);
     http_request_free(&req);
-    return keep;
+    return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
 }
 
 /* ============================== M2: 경로 확인 (Phase 1에서 이어짐) ============================== */

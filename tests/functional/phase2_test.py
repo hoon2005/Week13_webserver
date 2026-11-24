@@ -199,7 +199,8 @@ class Phase2Test(unittest.TestCase):
     def test_cgi_does_not_inherit_other_client_socket(self):
         # 1) 다른 손님 연결을 먼저 열어 둠 (keep-alive로 작업자가 붙잡고 있음)
         # 2) slow CGI를 fork → 이때 열려 있는 fd를 CGI가 물려받을 수 있음
-        # 3) 처음 연결이 Connection: close로 끝나면 클라이언트가 EOF를 받아야 함
+        # 3) 처음 연결은 아무것도 보내지 않아 읽기 타임아웃(1초)으로 서버가
+        #    조용히 close함. 클라이언트가 EOF를 받아야 함
         #    (CGI가 소켓을 물고 있으면 서버가 close해도 FIN이 나가지 않음)
         with self.server.connect() as sock:
             f = sock.makefile("rb")
@@ -209,13 +210,7 @@ class Phase2Test(unittest.TestCase):
             try:
                 slow.sendall(b"GET /cgi-bin/slow HTTP/1.1\r\nHost: x\r\n\r\n")
                 time.sleep(0.3)
-                sock.sendall(
-                    b"GET /home.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
-                )
-                status, headers, _, _ = read_response(f)
-                self.assertEqual(status, 200)
-                self.assertEqual(headers["connection"], "close")
-                self.assertTrue(closed_by_server(sock, 2))
+                self.assertTrue(closed_by_server(sock, 4))
             finally:
                 slow.close()
 
@@ -283,6 +278,16 @@ class Phase2Test(unittest.TestCase):
                 self.assertEqual(status, expected)
                 self.assertIn("content-length", headers)
                 self.assertEqual(headers["connection"], "close")
+
+    def test_error_response_survives_unread_request_data(self):
+        # 서버가 다 읽지 않은 데이터(긴 요청 줄)를 남기고 오류 응답 뒤 닫아도
+        # 클라이언트가 응답을 끝까지 받아야 함 (RST로 응답이 사라지면 안 됨)
+        with self.server.connect() as sock:
+            sock.sendall(b"GET /" + b"a" * 20000 + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+            time.sleep(0.3)
+            status, headers, body, _ = read_response(sock.makefile("rb"))
+            self.assertEqual(status, 414)
+            self.assertEqual(len(body), int(headers["content-length"]))
 
     def test_static_post_is_501_and_keeps_connection(self):
         status, headers, _, _ = exchange(
