@@ -39,7 +39,7 @@ static void http_error_send(int fd, const char *cause, const char *errnum,
 
 /* M3: CGI */
 static void cgi_serve(int fd, const char *filename, const char *cgiargs);     /* serve_dynamic 대신 (부모 쪽) */
-static void cgi_child_run(int fd, const char *filename, const char *cgiargs); /* serve_dynamic의 자식 부분 분리 */
+static void cgi_child_run(int fd, const char *filename, char **envp); /* serve_dynamic의 자식 부분 분리 */
 
 
 /* ============================== M1 소켓 연결 ============================== */
@@ -581,8 +581,14 @@ static void http_error_send(int fd, const char *cause, const char *errnum,
 static void cgi_serve(int fd, const char *filename, const char *cgiargs)
 {
     char header[MAXLINE];
+    char query_env[MAXLINE + 16]; /* "QUERY_STRING=" + 쿼리 문자열 */
+    char *envp[] = {query_env, NULL};
     int header_len;
     pid_t pid;
+
+    /* CGI에 넘길 환경 변수를 fork 전에 만든다. 스레드가 여럿일 때 자식에서
+     * setenv를 부르면, 다른 스레드가 잡고 있던 락을 기다리다 멈출 수 있음 */
+    snprintf(query_env, sizeof(query_env), "QUERY_STRING=%s", cgiargs);
 
     /* Tiny는 sprintf + Rio_writen을 두 번 → snprintf 한 번으로 만들어 한 번에 보냄 */
     header_len = snprintf(header, sizeof(header),
@@ -598,8 +604,8 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
         perror("fork");    /* 원인만 출력하고 */
         return;            /* 이 요청만 끝냄 (서버는 계속 동작) */
     }
-    if (pid == 0) {                           /* 자식 프로세스이면 */
-        cgi_child_run(fd, filename, cgiargs); /* 자식 일은 함수로 분리 (돌아오지 않음) */
+    if (pid == 0) {                        /* 자식 프로세스이면 */
+        cgi_child_run(fd, filename, envp); /* 자식 일은 함수로 분리 (돌아오지 않음) */
     }
     /* 부모: 방금 만든 자식이 끝날 때까지 기다렸다가 회수.
      * Wait(대문자)도 실패하면 exit하므로 waitpid로 바꾸고 실패는 출력만 함 */
@@ -611,13 +617,16 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
 /*
  * 자식 프로세스에서 CGI 프로그램을 실행합니다.
  * Tiny의 serve_dynamic에서 if (Fork() == 0) { ... } 안에 있던 코드를 뺐습니다.
- * 동작 변화 없음. (여기서 대문자 래퍼가 exit해도 자식만 끝나고 서버는 무사함)
+ * fork 뒤의 자식은 dup2와 execve만 합니다. 실패하면 _exit로 자식만 끝냅니다.
+ * (exit는 부모에게서 복사된 출력 버퍼까지 내보내므로 쓰지 않음)
  */
-static void cgi_child_run(int fd, const char *filename, const char *cgiargs)
+static void cgi_child_run(int fd, const char *filename, char **envp)
 {
     char *argv[] = {NULL}; /* Tiny의 emptylist: CGI 프로그램에 넘길 인자 없음 */
 
-    setenv("QUERY_STRING", cgiargs, 1); /* 쿼리 문자열(예: "1&2")을 환경 변수로 넘김 */
-    Dup2(fd, STDOUT_FILENO);            /* 표준 출력(1번)을 클라이언트 소켓으로 돌림 → printf가 곧바로 응답이 됨 */
-    Execve(filename, argv, environ);    /* 이 프로세스를 CGI 프로그램으로 바꿈. 성공하면 돌아오지 않음 */
+    if (dup2(fd, STDOUT_FILENO) < 0) { /* 표준 출력(1번)을 클라이언트 소켓으로 돌림 → printf가 곧바로 응답이 됨 */
+        _exit(1);
+    }
+    execve(filename, argv, envp); /* 이 프로세스를 CGI 프로그램으로 바꿈. 성공하면 돌아오지 않음 */
+    _exit(1);                     /* 여기 왔다면 execve 실패 */
 }
