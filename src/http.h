@@ -90,6 +90,15 @@ long http_body_length(const struct http_request *req);
 int http_parse_content_length(const char *value, long *out);
 
 /*
+ * 탭이 아닌 ASCII 제어 문자가 있으면 1. 요청 줄, 헤더 줄, 백엔드 상태 줄에 씁니다.
+ *   NUL: C 문자열이 거기서 끝나 뒤를 못 봄 ("7\0abc"를 7로 읽음)
+ *   CR:  백엔드가 줄을 우리와 다르게 나누면 요청 경계가 어긋남
+ *   그 밖: 헤더 값과 URI에 쓸 수 없는 글자 (RFC 9110 5.5). 백엔드의 파서가
+ *          우리와 다르게 읽을 수 있음
+ */
+int http_has_control(const char *s, size_t n);
+
+/*
  * 헤더 블록("이름: 값" 줄이 이어진 것, 빈 줄 제외)에서 pos 위치의 헤더 하나를
  * 읽고 pos를 다음 줄로 옮깁니다. 이름과 값은 블록 안을 가리키며 NUL로 끝나지
  * 않습니다. CGI 출력, 백엔드 응답, 손님의 원본 헤더에 같이 씁니다.

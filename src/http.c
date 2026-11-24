@@ -3,12 +3,14 @@
  */
 #include "http.h"
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
 
 void http_request_init(struct http_request *req)
 {
@@ -39,45 +41,18 @@ static size_t line_content_len(const char *line, size_t len)
     return len;
 }
 
-/*
- * 줄 안에 NUL이나 줄 끝이 아닌 CR이 있으면 1.
- *   NUL: C 문자열이 거기서 끝나 뒤를 못 봄 ("7\0abc"를 7로 읽음)
- *   CR:  백엔드가 줄을 우리와 다르게 나누면 요청 경계가 어긋남
- */
-static int has_bad_bytes(const char *s, size_t n)
+int http_has_control(const char *s, size_t n)
 {
-    return memchr(s, '\0', n) != NULL || memchr(s, '\r', n) != NULL;
-}
-
-/*
- * Host 값 검사 (RFC 9112 3.2): 이름[:포트] 또는 [IPv6][:포트].
- *   이름은 RFC 3986의 reg-name 글자만 받음. 빈 값은 문법에 맞으므로 허용.
- *   대괄호 안은 쓸 수 있는 글자만 보고 IPv6 주소가 맞는지까지는 보지 않음.
- */
-static int host_is_valid(const char *v)
-{
-    static const char name_marks[] = "-._~%!$&'()*+,;=";
-
-    if (*v == '[') {
-        size_t n = strspn(++v, "0123456789abcdefABCDEF:.");
-        if (n == 0 || v[n] != ']') {
-            return 0;
-        }
-        v += n + 1;
-    } else {
-        while (*v != '\0' &&
-               (isalnum((unsigned char)*v) || strchr(name_marks, *v) != NULL)) {
-            v++;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c < 0x20 && c != '\t') || c == 0x7f) {
+            return 1;
         }
     }
-    if (*v == ':') {
-        v++;
-        v += strspn(v, "0123456789");
-    }
-    return *v == '\0';
+    return 0;
 }
 
-/* 메서드 이름에 쓸 수 있는 글자로만 되어 있으면 1 (RFC 9110의 token) */
+/* 메서드와 헤더 이름에 쓸 수 있는 글자로만 되어 있으면 1 (RFC 9110의 token) */
 static int is_token(const char *s, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
@@ -86,7 +61,57 @@ static int is_token(const char *s, size_t n)
             return 0;
         }
     }
-    return 1;
+    return n > 0;
+}
+
+/*
+ * Host 값 검사 (RFC 9112 3.2): 이름[:포트] 또는 [IPv6][:포트].
+ *   이름은 RFC 3986의 reg-name 글자만 받고, %는 뒤에 16진수 두 자리가 있어야 함.
+ *   이름이 비면 거절 (http URI의 호스트는 빌 수 없음, RFC 9110 4.2.1).
+ *   [v1.x] 같은 IPvFuture는 받지 않음.
+ */
+static int host_is_valid(const char *v)
+{
+    if (*v == '[') {
+        char text[INET6_ADDRSTRLEN];
+        struct in6_addr addr;
+        size_t n = strspn(++v, "0123456789abcdefABCDEF:.");
+
+        if (v[n] != ']' || n >= sizeof(text)) {
+            return 0;
+        }
+        memcpy(text, v, n);
+        text[n] = '\0';
+        if (inet_pton(AF_INET6, text, &addr) != 1) {
+            return 0;
+        }
+        v += n + 1;
+    } else {
+        const char *start = v;
+
+        while (*v != '\0') {
+            if (*v == '%') {
+                if (!isxdigit((unsigned char)v[1]) ||
+                    !isxdigit((unsigned char)v[2])) {
+                    return 0;
+                }
+                v += 3;
+            } else if (isalnum((unsigned char)*v) ||
+                       strchr("-._~!$&'()*+,;=", *v) != NULL) {
+                v++;
+            } else {
+                break;
+            }
+        }
+        if (v == start) {
+            return 0;
+        }
+    }
+    if (*v == ':') {
+        v++;
+        v += strspn(v, "0123456789");
+    }
+    return *v == '\0';
 }
 
 /* "HTTP/x.y" 형식이면 0, 아니면 -1. 맞으면 major, minor를 채움 */
@@ -120,7 +145,7 @@ int http_parse_request_line(struct http_request *req, const char *line,
         return (len >= maxlen - 1) ? 414 : 400;
     }
     end = line_content_len(line, len);
-    if (has_bad_bytes(line, end)) {
+    if (http_has_control(line, end)) {
         return 400;
     }
 
@@ -267,7 +292,7 @@ int http_parse_header_line(struct http_request *req, const char *line,
     if (end == 0) {
         return 1; /* 빈 줄: 헤더 끝 */
     }
-    if (has_bad_bytes(line, end)) {
+    if (http_has_control(line, end)) {
         return 400;
     }
 
@@ -283,10 +308,8 @@ int http_parse_header_line(struct http_request *req, const char *line,
         return 400; /* ':'가 없거나 이름이 비었음 */
     }
     name_len = (size_t)(colon - line);
-    for (size_t i = 0; i < name_len; i++) {
-        if (is_space(line[i])) {
-            return 400; /* 이름 안이나 ':' 앞의 공백은 허용하지 않음 */
-        }
+    if (!is_token(line, name_len)) {
+        return 400; /* 이름 안이나 ':' 앞의 공백도 여기에 걸림 */
     }
     memcpy(name, line, name_len);
     name[name_len] = '\0';
@@ -398,13 +421,11 @@ int http_header_next(const char *block, size_t len, size_t *pos,
     n = line_content_len(line, n);
 
     colon = memchr(line, ':', n);
-    if (colon == NULL || colon == line || has_bad_bytes(line, n)) {
+    if (colon == NULL || colon == line || http_has_control(line, n)) {
         return -1;
     }
-    for (const char *p = line; p < colon; p++) {
-        if (is_space(*p)) {
-            return -1; /* 이름 안이나 앞의 공백 (앞줄에서 이어진 줄 포함) */
-        }
+    if (!is_token(line, (size_t)(colon - line))) {
+        return -1; /* 앞줄에서 이어진 줄(공백으로 시작)도 여기에 걸림 */
     }
     v = colon + 1;
     vend = line + n;

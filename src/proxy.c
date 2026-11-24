@@ -309,8 +309,7 @@ int proxy_response_parse(const char *head, size_t len,
         !isdigit((unsigned char)status[1]) ||
         !isdigit((unsigned char)status[2]) ||
         (line_len > 12 && head[12] != ' ') ||
-        memchr(head, '\0', line_len) != NULL ||
-        memchr(head, '\r', line_len) != NULL) {
+        http_has_control(head, line_len)) {
         return -1;
     }
     resp->status =

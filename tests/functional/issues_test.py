@@ -58,11 +58,30 @@ class RequestCheckTest(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
-    def test_형식이_틀린_Host는_400이다(self):
-        status, _, _, _ = exchange(
-            self.server, b"GET /home.html HTTP/1.1\r\nHost: a/b\r\n\r\n"
+    def test_형식이_틀렸거나_비어_있는_Host는_400이다(self):
+        for host in (b"a/b", b"", b":80", b"a%zz", b"[:::::]", b"[1.2.3.4]"):
+            with self.subTest(host=host):
+                status, _, _, _ = exchange(
+                    self.server, b"GET /home.html HTTP/1.1\r\nHost: " + host + b"\r\n\r\n"
+                )
+                self.assertEqual(status, 400)
+
+    def test_HTTP_1_0에서_Host가_없는_요청은_받는다(self):
+        self.assertEqual(
+            exchange(self.server, b"GET /home.html HTTP/1.0\r\n\r\n")[0], 200
         )
-        self.assertEqual(status, 400)
+
+    def test_헤더_이름과_값의_쓸_수_없는_글자는_400이다(self):
+        for line in (
+            b"Transfer-Encoding\x0b: chunked", b"X(Y): 1", b"Content-Length;: 5",
+            b"X-A: a\x01b", b"X-A: \x7f",
+        ):
+            with self.subTest(line=line):
+                status, _, _, _ = exchange(
+                    self.server,
+                    b"GET /home.html HTTP/1.1\r\nHost: x\r\n" + line + b"\r\n\r\n",
+                )
+                self.assertEqual(status, 400)
 
 
 class KeepAliveDelayTest(unittest.TestCase):
@@ -192,6 +211,12 @@ class CgiResponseTest(unittest.TestCase):
     def test_상태가_숫자_세_자리가_아니면_500이다(self):
         path = self.cgi("sbad", "Status: 2xx OK\\n\\n")
         self.assertEqual(get(self.server, path)[0], 500)
+
+    def test_헤더_이름이나_값이_틀린_CGI는_500이다(self):
+        for i, line in enumerate(("Bad Name: x", "X(Y): 1", "X-A: a\001b")):
+            with self.subTest(line=line):
+                path = self.cgi("bad%d" % i, "Content-Type: text/plain\n%s\n\nok" % line)
+                self.assertEqual(get(self.server, path)[0], 500)
 
     def test_한_구간_전용_헤더는_빼고_나머지는_전달한다(self):
         path = self.cgi(

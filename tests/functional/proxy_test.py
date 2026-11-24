@@ -367,6 +367,8 @@ class FailureTest(ProxyCase):
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
             b"HTTP/1.0 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab",
             b"HTTP/1.1 101 Switching Protocols\r\n\r\n",
+            b"HTTP/1.0 200 OK\r\nTransfer-Encoding\x0b: chunked\r\n\r\n",
+            b"HTTP/1.0 200 OK\r\nX-A: a\x01b\r\n\r\n", b"HTTP/1.0 200 O\x01K\r\n\r\n",
             b"HTTP/1.0 200 OK\r\nX: " + b"a" * 9000 + b"\r\n\r\n",
         ):
             with self.subTest(data=data[:50]):

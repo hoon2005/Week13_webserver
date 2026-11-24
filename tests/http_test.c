@@ -276,6 +276,45 @@ static void test_cr_inside_line_is_rejected(void)
     free(req);
 }
 
+static void test_control_bytes_are_rejected(void)
+{
+    struct http_request *req = new_request();
+
+    TEST_CHECK(parse_line(req, "GET /a\x01"
+                               "b HTTP/1.1\r\n") == 400);
+    http_request_init(req);
+    TEST_CHECK(parse_header(req, "X-A: a\x0b\r\n") == 400);
+    TEST_CHECK(parse_header(req, "X-A: a\x7f\r\n") == 400);
+    /* 값 안의 탭과 ASCII가 아닌 글자는 받음 */
+    TEST_CHECK(parse_header(req, "X-A: a\tb\r\n") == 0);
+    TEST_CHECK(parse_header(req, "X-B: \xea\xb0\x80\r\n") == 0);
+    free(req);
+}
+
+static void test_header_name_must_be_token(void)
+{
+    static const char *const bad[] = {"Transfer-Encoding\x0b: chunked\r\n",
+                                      "X(Y): 1\r\n",
+                                      "Content-Length;: 5\r\n",
+                                      "X Y: 1\r\n",
+                                      "X : 1\r\n",
+                                      "\xea\xb0\x80: 1\r\n",
+                                      ": 1\r\n"};
+    struct http_request *req = new_request();
+
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct http_header h;
+        size_t pos = 0;
+        http_request_init(req);
+        TEST_CHECK_(parse_header(req, bad[i]) == 400, "%s", bad[i]);
+        TEST_CHECK_(http_header_next(bad[i], strlen(bad[i]), &pos, &h) == -1,
+                    "%s", bad[i]);
+    }
+    http_request_init(req);
+    TEST_CHECK(parse_header(req, "X_a.b-1!~: 1\r\n") == 0);
+    free(req);
+}
+
 static void test_uri_must_start_with_slash(void)
 {
     struct http_request *req = new_request();
@@ -297,9 +336,14 @@ static void test_host_format(void)
                                        "[::1]",
                                        "[::1]:80",
                                        "a:",
-                                       ""};
-    static const char *const bad[] = {"a b",  "a/b", "a@b",    "a:80x", "a:b:c",
-                                      "[::1", "[]",  "[::1]x", "<x>",   "a\"b"};
+                                       "a%41b",
+                                       "[::ffff:1.2.3.4]",
+                                       "[2001:db8::1]:8080"};
+    static const char *const bad[] = {
+        "a b",     "a/b",       "a@b",       "a:80x",  "a:b:c",
+        "[::1",    "[]",        "[::1]x",    "<x>",    "a\"b",
+        "",        ":80",       "a%zz",      "a%4",    "a%",
+        "[:::::]", "[12345::]", "[1.2.3.4]", "[v1.x]", "[::1%lo]"};
     struct http_request *req = new_request();
     char line[64];
 
@@ -415,6 +459,9 @@ TEST_LIST = {
     {"mime", test_mime},
     {"NUL이 든 요청 줄과 헤더 줄은 400이다", test_nul_byte_is_rejected},
     {"줄 중간에 CR이 있으면 400이다", test_cr_inside_line_is_rejected},
+    {"탭이 아닌 제어 문자가 있으면 400이다", test_control_bytes_are_rejected},
+    {"헤더 이름에 쓸 수 없는 글자가 있으면 거절한다",
+     test_header_name_must_be_token},
     {"/로 시작하지 않는 URI는 400이다", test_uri_must_start_with_slash},
     {"Host는 이름[:포트] 형식만 받고 나머지는 400이다", test_host_format},
     {"메서드에 쓸 수 없는 글자가 있으면 400, 모르는 메서드면 501이다",
