@@ -24,6 +24,7 @@
 #include "conn_queue.h"
 #include "http.h"
 
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <strings.h>
 #include <time.h>
@@ -110,7 +111,7 @@ static void config_parse(int argc, char **argv)
 
 static int listen_socket_open(const char *port);
 static int accept_cloexec(int listenfd);
-static void socket_timeouts_set(int connfd);
+static void socket_options_set(int connfd);
 static void *worker_main(void *arg);
 static int serve_connection(int connfd);
 static void connection_close_lingering(int connfd);
@@ -184,7 +185,7 @@ int main(int argc, char **argv)
             }
             continue;
         }
-        socket_timeouts_set(connfd);
+        socket_options_set(connfd);
         if (conn_queue_push(&queue, connfd) < 0) {
             close(connfd); /* 종료 중 (M7) */
         }
@@ -276,12 +277,18 @@ static int accept_cloexec(int listenfd)
  *   접속만 하고 보내지 않는 손님, keep-alive로 쉬는 연결, 응답을 받아 가지 않는
  *   손님이 작업자를 붙잡지 못하게 합니다. 시간이 지나면 read/write가 -1을
  *   돌려주고 rio 함수도 -1을 돌려주므로 요청이 응답 없이 끝납니다.
+ *
+ * TCP_NODELAY: 작은 데이터도 바로 보냅니다. 응답은 헤더와 본문을 따로 쓰는데,
+ *   이 옵션이 없으면 커널이 헤더의 ACK가 올 때까지 본문을 붙잡고(Nagle) 손님은
+ *   ACK를 약 40ms 늦게 보내서, keep-alive 요청마다 그만큼 느려집니다.
  */
-static void socket_timeouts_set(int connfd)
+static void socket_options_set(int connfd)
 {
     struct timeval rcv = {cfg.timeout, 0};
     struct timeval snd = {cfg.timeout * 2, 0};
+    int on = 1;
 
+    setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
     setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv));
     setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
 }
