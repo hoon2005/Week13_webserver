@@ -8,6 +8,7 @@
 #include "http.h"
 
 #include <string.h>
+#include <unistd.h>
 
 /* ---------- 도우미 ---------- */
 
@@ -391,6 +392,154 @@ static void test_status_text(void)
                0);
 }
 
+/* ---------- 본문 (B, X: M5-2) ---------- */
+
+/* 문자열 하나로 Content-Length만 정한 요청 */
+static void req_with_cl(struct http_request *req, long cl)
+{
+    http_request_init(req);
+    req->minor = 1;
+    req->has_content_length = 1;
+    req->content_length = cl;
+}
+
+/* E-B10, E-B14: 1 MiB까지는 받고, 넘으면 413 (malloc 전에) */
+static void test_body_check_limit(void)
+{
+    struct http_request req;
+
+    req_with_cl(&req, BODY_MAX);
+    TEST_CHECK(http_body_check(&req) == 0);
+    req_with_cl(&req, BODY_MAX + 1L);
+    TEST_CHECK(http_body_check(&req) == 413);
+    TEST_CHECK(req.body == NULL); /* 검사만 하고 메모리는 잡지 않음 */
+    http_request_init(&req);      /* CL 없음 */
+    TEST_CHECK(http_body_check(&req) == 0);
+}
+
+/* E-X1 ~ E-X4, E-B2: Expect 판단 */
+static void test_expect_check(void)
+{
+    struct http_request req;
+
+    req_with_cl(&req, 7);
+    TEST_CHECK(http_expect_check(&req) == 0); /* Expect 없음 */
+    req.expect = HTTP_EXPECT_100_CONTINUE;
+    TEST_CHECK(http_expect_check(&req) == HTTP_EXPECT_SEND_100);
+    req.expect = HTTP_EXPECT_OTHER;
+    TEST_CHECK(http_expect_check(&req) == 417);
+    req.minor = 0; /* HTTP/1.0은 Expect를 무시 */
+    TEST_CHECK(http_expect_check(&req) == 0);
+
+    req_with_cl(&req, 0); /* 본문 0바이트면 100을 보낼 이유가 없음 */
+    req.expect = HTTP_EXPECT_100_CONTINUE;
+    TEST_CHECK(http_expect_check(&req) == 0);
+}
+
+/* pipe의 쓰기 쪽에 data를 쓰고, close_write면 닫음. 읽기 쪽 fd를 돌려줌.
+ * pipe 버퍼(보통 64 KiB)보다 작은 데이터만 씀 */
+static int pipe_with(const char *data, size_t len, int close_write, int *wfd)
+{
+    int fds[2];
+
+    if (pipe(fds) < 0) {
+        return -1;
+    }
+    if (write(fds[1], data, len) != (ssize_t)len) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (close_write) {
+        close(fds[1]);
+        *wfd = -1;
+    } else {
+        *wfd = fds[1];
+    }
+    return fds[0];
+}
+
+static void test_body_read_ok(void)
+{
+    struct http_request req;
+    rio_t rio;
+    int wfd;
+    int rfd = pipe_with("hello", 5, 1, &wfd);
+
+    TEST_ASSERT(rfd >= 0);
+    rio_readinitb(&rio, rfd);
+    req_with_cl(&req, 5);
+    TEST_CHECK(http_body_read(&req, &rio) == 0);
+    TEST_CHECK(req.body_len == 5);
+    TEST_CHECK(req.body != NULL && memcmp(req.body, "hello", 5) == 0);
+    http_request_free(&req);
+    TEST_CHECK(req.body == NULL);
+    close(rfd);
+}
+
+/* E-B12: 본문이 CL보다 짧은 채 끊김 → -1, 버퍼는 해제됨 (LeakSanitizer가 확인) */
+static void test_body_read_short(void)
+{
+    struct http_request req;
+    rio_t rio;
+    int wfd;
+    int rfd = pipe_with("ab", 2, 1, &wfd);
+
+    TEST_ASSERT(rfd >= 0);
+    rio_readinitb(&rio, rfd);
+    req_with_cl(&req, 7);
+    TEST_CHECK(http_body_read(&req, &rio) == -1);
+    TEST_CHECK(req.body == NULL);
+    TEST_CHECK(req.body_len == 0);
+    close(rfd);
+}
+
+/* E-B1: CL이 없으면 읽지 않고 body = NULL */
+static void test_body_read_none(void)
+{
+    struct http_request req;
+    rio_t rio;
+    int wfd;
+    int rfd = pipe_with("x", 1, 1, &wfd);
+
+    TEST_ASSERT(rfd >= 0);
+    rio_readinitb(&rio, rfd);
+    http_request_init(&req);
+    TEST_CHECK(http_body_read(&req, &rio) == 0);
+    TEST_CHECK(req.body == NULL && req.body_len == 0);
+    close(rfd);
+}
+
+/* E-B16: 헤더를 읽을 때 rio가 본문 앞부분까지 미리 읽어 둠 → 같은 rio로 읽어야 함 */
+static void test_body_after_headers_same_rio(void)
+{
+    const char text[] = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
+                        "\r\nhello";
+    struct http_request req;
+    char line[MAXLINE];
+    rio_t rio;
+    ssize_t n;
+    int wfd;
+    int rfd = pipe_with(text, sizeof(text) - 1, 1, &wfd);
+    int status;
+
+    TEST_ASSERT(rfd >= 0);
+    rio_readinitb(&rio, rfd);
+    http_request_init(&req);
+    n = rio_readlineb(&rio, line, sizeof(line));
+    TEST_ASSERT(http_request_line_parse(&req, line, (size_t)n) == 0);
+    while ((n = rio_readlineb(&rio, line, sizeof(line))) > 0 &&
+           !http_is_blank_line(line, (size_t)n)) {
+        TEST_ASSERT(http_header_line_parse(&req, line, (size_t)n) == 0);
+    }
+    TEST_ASSERT(http_headers_validate(&req) == 0);
+    status = http_body_read(&req, &rio);
+    TEST_CHECK(status == 0);
+    TEST_CHECK(req.body_len == 5 && memcmp(req.body, "hello", 5) == 0);
+    http_request_free(&req);
+    close(rfd);
+}
+
 TEST_LIST = {
     {"line_check", test_line_check},
     {"blank_line", test_blank_line},
@@ -412,5 +561,11 @@ TEST_LIST = {
     {"no_body_headers", test_no_body_headers},
     {"mime_type", test_mime_type},
     {"status_text", test_status_text},
+    {"body_check_limit", test_body_check_limit},
+    {"expect_check", test_expect_check},
+    {"body_read_ok", test_body_read_ok},
+    {"body_read_short", test_body_read_short},
+    {"body_read_none", test_body_read_none},
+    {"body_after_headers_same_rio", test_body_after_headers_same_rio},
     {NULL, NULL},
 };

@@ -1,4 +1,4 @@
-"""M5-1 요청 파서와 응답 형식 기능 테스트입니다.
+"""M5-1 요청 파서·응답 형식, M5-2 요청 본문 기능 테스트입니다.
 
 사용법: python3 http_parse_test.py <build 폴더>
 
@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from baseline_test import (
@@ -259,6 +260,117 @@ class HttpParseTest(unittest.TestCase):
                 resp = self.get(path)
                 self.assertEqual(resp.status, status)
                 self.assert_framed(resp)
+
+    # ---------- 본문 (M5-2) ----------
+
+    def post(self, path, body, extra=b"", version=b"HTTP/1.1"):
+        return self.send_raw(
+            b"POST " + path.encode() + b" " + version + b"\r\nHost: x\r\n"
+            + b"Content-Length: %d\r\n" % len(body) + extra + b"\r\n" + body
+        )
+
+    def test_post_adder_form(self):  # E-A1
+        resp = self.post("/cgi-bin/adder", b"a=1&b=2",
+                         extra=b"Content-Type: application/x-www-form-urlencoded\r\n")
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"1 + 2 = 3", resp.body)
+
+    def test_post_adder_plain(self):
+        resp = self.post("/cgi-bin/adder", b"10&-4")
+        self.assertIn(b"10 + -4 = 6", resp.body)
+
+    def test_post_without_content_length(self):  # E-B1
+        resp = self.send_raw(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"Give two numbers", resp.body)
+
+    def test_adder_messages(self):  # E-A3 ~ E-A6
+        for path, text in (
+            ("/cgi-bin/adder", b"Give two numbers"),
+            ("/cgi-bin/adder?a&b", b"whole numbers"),
+            ("/cgi-bin/adder?99999999999999999999&1", b"between"),
+            ("/cgi-bin/adder?1", b"exactly two"),
+            ("/cgi-bin/adder?1&2&3", b"exactly two"),
+        ):
+            with self.subTest(path=path):
+                resp = self.get(path)
+                self.assertEqual(resp.status, 200)
+                self.assertIn(text, resp.body)
+
+    def test_adder_no_longer_prints_connection(self):
+        resp = self.get("/cgi-bin/adder?1&2")
+        self.assertNotIn("content-length", resp.headers)  # M5-3에서 서버가 붙임
+        self.assertNotIn("connection", resp.headers)
+
+    def test_expect_100_continue(self):  # E-X1
+        with socket.create_connection((HOST, self.port), timeout=REQUEST_TIMEOUT_SEC) as s:
+            s.sendall(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Length: 7\r\nExpect: 100-continue\r\n\r\n")
+            s.settimeout(0.5)  # 100이 오지 않으면 curl처럼 기다리게 됨 → 바로 와야 함
+            first = s.recv(1024)
+            self.assertEqual(first, b"HTTP/1.1 100 Continue\r\n\r\n")
+            s.settimeout(REQUEST_TIMEOUT_SEC)
+            s.sendall(b"a=1&b=2")
+            rest = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                rest += chunk
+        resp = Response(rest)
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"1 + 2 = 3", resp.body)
+
+    def test_expect_with_too_big_body_413(self):  # E-X2
+        resp = self.send_raw(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+                             b"Content-Length: 2000000\r\nExpect: 100-continue\r\n\r\n")
+        self.assertEqual(resp.status, 413)  # 100 없이 바로 413
+        self.assertNotIn(b"100 Continue", resp.raw)
+        self.assert_framed(resp)
+
+    def test_too_big_body_413_before_body(self):  # E-B10
+        start = time.monotonic()
+        resp = self.send_raw(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+                             b"Content-Length: 2000000\r\n\r\n")
+        self.assertEqual(resp.status, 413)
+        self.assertLess(time.monotonic() - start, 3)  # 본문을 기다리지 않음
+
+    def test_exactly_limit_is_accepted(self):  # E-B14
+        body = b"a" * (1 << 20)
+        with socket.create_connection((HOST, self.port), timeout=REQUEST_TIMEOUT_SEC) as s:
+            s.sendall(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Length: %d\r\n\r\n" % len(body))
+            s.sendall(body)
+            raw = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+        resp = Response(raw)
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"too long", resp.body)  # adder가 읽고 길다고 안내
+
+    def test_other_expect_417(self):  # E-X3
+        resp = self.post("/cgi-bin/adder", b"x", extra=b"Expect: foo\r\n")
+        self.assertEqual(resp.status, 417)
+
+    def test_http10_ignores_expect(self):  # E-X4
+        resp = self.post("/cgi-bin/adder", b"a=1&b=2", extra=b"Expect: foo\r\n",
+                         version=b"HTTP/1.0")
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"1 + 2 = 3", resp.body)
+
+    def test_short_body_no_response(self):  # E-B12
+        resp = self.send_raw(b"POST /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n"
+                             b"Content-Length: 100\r\n\r\nab", close_write=True)
+        self.assertEqual(resp.raw, b"")
+        self.assertEqual(self.get("/home.html").status, 200)
+
+    def test_get_with_body_is_read_and_ignored(self):  # E-B11
+        resp = self.send_raw(b"GET /home.html HTTP/1.1\r\nHost: x\r\n"
+                             b"Content-Length: 5\r\n\r\nhello")
+        self.assertEqual(resp.status, 200)
 
     # ---------- MIME ----------
 

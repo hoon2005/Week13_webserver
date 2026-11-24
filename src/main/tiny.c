@@ -17,6 +17,8 @@
  *   Phase 2 M5-1: 요청 줄과 헤더를 http.c의 파서로 읽어 검사하고(400/414/501/505),
  *   모든 응답을 HTTP/1.1 + Content-Length + Connection으로 보냅니다.
  *   HEAD(정적 파일만), CSS·JS MIME, --root를 지원합니다.
+ *   Phase 2 M5-2: Content-Length만큼 요청 본문을 읽습니다(1 MiB 넘으면 413,
+ *   Expect: 100-continue에 답함). CGI POST는 본문을 임시 파일에 담아 stdin으로 넘깁니다.
  *   사용법: ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
  */
@@ -59,8 +61,11 @@ static void http_error_send(int fd, int head, int status, const char *cause,
                             const char *longmsg); /* clienterror 대신 */
 
 /* M3: CGI */
-static void cgi_serve(int fd, const char *filename, const char *cgiargs);     /* serve_dynamic 대신 (부모 쪽) */
-static void cgi_child_run(int fd, const char *filename, char *const envp[]);  /* serve_dynamic의 자식 부분 분리 */
+static int cgi_serve(int fd, const char *filename, const char *cgiargs,
+                     const struct http_request *req);  /* serve_dynamic 대신 (부모 쪽) */
+static int cgi_input_open(const struct http_request *req); /* [M5-2] CGI stdin 준비 */
+static void cgi_child_run(int fd, int infd, const char *filename,
+                          char *const envp[]);         /* serve_dynamic의 자식 부분 분리 */
 
 
 /* ============================== M1 소켓 연결 ============================== */
@@ -425,8 +430,12 @@ static int listen_socket_open(const char *port)
 static const char *request_error_msg(int status)
 {
     switch (status) {
+    case 413:
+        return "The request body is larger than 1 MiB";
     case 414:
         return "The request line is too long";
+    case 417:
+        return "Tiny only understands Expect: 100-continue";
     case 501:
         return "Tiny does not implement this method or transfer encoding";
     case 505:
@@ -444,8 +453,9 @@ static const char *request_error_msg(int status)
  * 흐름: 요청 읽기(요청 줄 + 헤더, request_read) → URI 확인 → URI 해석
  *       → 메서드 확인 → 파일 찾기 → (정적) 읽기 권한 확인 → static_file_serve
  *                                   (동적) 실행 권한 확인 → cgi_serve
- * 이 단계(M5-1)에서는 모든 응답 뒤에 연결을 닫습니다 (keep-alive는 M5-4a).
- * 요청 본문은 아직 읽지 않지만, 응답 뒤 바로 닫으므로 다음 요청과 섞이지 않습니다.
+ * 이 단계에서는 모든 응답 뒤에 연결을 닫습니다 (keep-alive는 M5-4a).
+ * [M5-2] 헤더 다음에 본문을 읽습니다: 크기 검사(413) → Expect(417, 100 Continue)
+ *   → Content-Length만큼 읽기. 본문을 받지 않고 거절했으면 남은 바이트를 비우고 닫습니다.
  */
 void doit(int fd)
 {
@@ -466,12 +476,47 @@ void doit(int fd)
         return;
     }
     head = strcmp(req.method, "HEAD") == 0;
-    /* 요청 읽기가 중간에 멈췄거나(오류), 본문이 있는데 아직 읽지 않았으면(M5-2 전) */
+    /* 요청 읽기가 중간에 멈췄거나(오류), 본문이 있는데 아직 읽지 않았으면 1 */
     unread = status > 0 || (req.has_content_length && req.content_length > 0);
     if (status > 0) { /* 형식 오류 400, 긴 요청 줄 414, 501, 505 */
         http_error_send(fd, head, status, "request", request_error_msg(status));
         goto done;
     }
+
+    /* [M5-2] 1-1. 본문을 받기 전 검사: 1 MiB 초과 413, 이상한 Expect 417.
+     * 크기를 먼저 보므로, 100-continue를 보낸 큰 본문은 100 없이 413을 받음 */
+    status = http_body_check(&req);
+    if (status == 0) {
+        status = http_expect_check(&req);
+    }
+    if (status == HTTP_EXPECT_SEND_100) {
+        /* "보내도 된다"고 답함. 답하지 않으면 curl은 약 1초 기다린 뒤 본문을 보냄 */
+        const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
+        if (rio_writen(fd, (void *)cont, sizeof(cont) - 1) !=
+            (ssize_t)(sizeof(cont) - 1)) {
+            goto done; /* 끊김 */
+        }
+        status = 0;
+    }
+    if (status != 0) { /* 413, 417: 본문은 받지 않음 → done에서 남은 바이트를 비움 */
+        http_error_send(fd, head, status, "request body",
+                        request_error_msg(status));
+        goto done;
+    }
+
+    /* [M5-2] 1-2. 본문 읽기: 헤더를 읽은 같은 rio로 Content-Length만큼.
+     * GET에 붙은 본문도 읽어서 버림 (읽지 않으면 keep-alive에서 다음 요청으로 읽힘) */
+    status = http_body_read(&req, &rio);
+    if (status < 0) { /* 본문 도중 끊김·타임아웃: 응답할 상대가 없음 */
+        unread = 0;
+        goto done;
+    }
+    if (status > 0) { /* 메모리 부족 500 */
+        http_error_send(fd, head, status, "request body",
+                        "Tiny couldn't allocate the request body");
+        goto done;
+    }
+    unread = 0; /* 요청을 끝까지 읽었음 */
 
     /* 2. URI 확인: 폴더 밖으로 나가는 ..이 있으면 403 */
     if (uri_check(req.uri) != 0) {
@@ -502,13 +547,6 @@ void doit(int fd)
                         "Tiny does not implement HEAD for CGI programs");
         goto done;
     }
-    if (!is_static && strcmp(req.method, "POST") == 0) {
-        /* CGI POST는 요청 본문을 읽는 M5-2에서 연결함. 그 전까지는 본문 없이
-         * 실행하지 않도록 501 */
-        http_error_send(fd, head, 501, req.method,
-                        "Tiny does not implement POST for CGI programs yet");
-        goto done;
-    }
 
     /* 5. 파일 찾기: 없으면 404 */
     if (file_find(filename, &sbuf) != 0) {
@@ -533,13 +571,18 @@ void doit(int fd)
                             "Tiny couldn't run the CGI program");
             goto done;
         }
-        cgi_serve(fd, filename, cgiargs); /* serve_dynamic 대신 */
+        status = cgi_serve(fd, filename, cgiargs, &req); /* serve_dynamic 대신 */
+        if (status != 0) { /* CGI 입력 준비 실패: 아직 아무것도 안 보냈으므로 500 */
+            http_error_send(fd, head, status, filename,
+                            "Tiny couldn't prepare the CGI input");
+        }
     }
 
 done:
     if (unread) {
         conn_linger(fd);
     }
+    http_request_free(&req); /* [M5-2] 본문 버퍼는 모든 경로에서 해제 */
 }
 /*
  * [M5-1] 응답을 보낸 뒤, 아직 읽지 않은 요청 바이트를 잠깐 읽어 버립니다.
@@ -859,21 +902,48 @@ static void http_error_send(int fd, int head, int status, const char *cause,
  * 헤더를 fork 뒤로 옮기면 부모의 헤더와 자식의 출력 순서가 섞일 수 있어
  * 순서는 Tiny와 같게 둠.
  */
-static void cgi_serve(int fd, const char *filename, const char *cgiargs)
+static int cgi_serve(int fd, const char *filename, const char *cgiargs,
+                     const struct http_request *req)
 {
     char header[MAXLINE];
     int header_len;
     pid_t pid;
     /* [M4-3] CGI에 넘길 환경 변수를 fork 전에 부모가 만들어 둠 (아래 cgi_child_run 설명).
-     * 스택 배열이라 malloc이 없고, 자식은 fork로 복사된 이 배열을 그대로 execve에 넘김 */
+     * 스택 배열이라 malloc이 없고, 자식은 fork로 복사된 이 배열을 그대로 execve에 넘김.
+     * [M5-2] REQUEST_METHOD는 실제 메서드, POST면 CONTENT_LENGTH, 있으면 CONTENT_TYPE 추가 */
     char query_env[MAXLINE + sizeof("QUERY_STRING=")];
-    char method_env[] = "REQUEST_METHOD=GET";
-    char *envp[] = {query_env, method_env, NULL};
+    char method_env[sizeof("REQUEST_METHOD=") + sizeof(req->method)];
+    char length_env[sizeof("CONTENT_LENGTH=") + 24]; /* 24: 64비트 정수 자릿수보다 넉넉히 */
+    char type_env[sizeof("CONTENT_TYPE=") + sizeof(req->content_type)];
+    char *envp[5];
+    int envc = 0;
+    int infd;
     int n;
 
     n = snprintf(query_env, sizeof(query_env), "QUERY_STRING=%s", cgiargs);
     if (n < 0 || n >= (int)sizeof(query_env)) { /* 잘렸으면 잘린 쿼리로 실행하지 않음 */
-        return;
+        return 500;
+    }
+    envp[envc++] = query_env;
+    snprintf(method_env, sizeof(method_env), "REQUEST_METHOD=%s", req->method);
+    envp[envc++] = method_env;
+    if (strcmp(req->method, "POST") == 0) { /* 본문 길이: CGI가 stdin에서 읽을 바이트 수 */
+        snprintf(length_env, sizeof(length_env), "CONTENT_LENGTH=%zu",
+                 req->body_len);
+        envp[envc++] = length_env;
+    }
+    if (req->content_type[0] != '\0') { /* 해석하지 않고 그대로 넘김 */
+        snprintf(type_env, sizeof(type_env), "CONTENT_TYPE=%s",
+                 req->content_type);
+        envp[envc++] = type_env;
+    }
+    envp[envc] = NULL;
+
+    /* [M5-2] CGI의 표준 입력 준비. 200을 보내기 전에 해야 실패하면 500을 보낼 수 있음 */
+    infd = cgi_input_open(req);
+    if (infd < 0) {
+        perror("cgi input");
+        return 500;
     }
 
     /* Tiny는 sprintf + Rio_writen을 두 번 → snprintf 한 번으로 만들어 한 번에 보냄 */
@@ -882,22 +952,85 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
                           "Server: Tiny Web Server\r\n");
     /* [안정성 수정] Rio_writen 대신 rio_writen. 이미 끊겼으면 자식을 만들지 않음 */
     if (rio_writen(fd, header, header_len) != header_len) {
-        return;
+        close(infd);
+        return 0;
     }
 
     pid = fork(); /* [안정성 수정] Fork 대신 fork */
     if (pid < 0) {         /* 자식 생성 실패 */
         perror("fork");    /* 원인만 출력하고 */
-        return;            /* 이 요청만 끝냄 (서버는 계속 동작) */
+        close(infd);
+        return 0;          /* 200을 이미 보냈으므로 500으로 바꿀 수 없음 (M5-3에서 해결) */
     }
-    if (pid == 0) {                           /* 자식 프로세스이면 */
-        cgi_child_run(fd, filename, envp); /* 자식 일은 함수로 분리 (돌아오지 않음) */
+    if (pid == 0) {                              /* 자식 프로세스이면 */
+        cgi_child_run(fd, infd, filename, envp); /* 자식 일은 함수로 분리 (돌아오지 않음) */
     }
+    close(infd); /* [M5-2] 부모는 입력 fd가 필요 없음. 임시 파일은 이름이 없어 자식이 닫으면 사라짐 */
     /* 부모: 방금 만든 자식이 끝날 때까지 기다렸다가 회수.
      * Wait(대문자)도 실패하면 exit하므로 waitpid로 바꾸고 실패는 출력만 함 */
     if (waitpid(pid, NULL, 0) < 0) {
         perror("waitpid");
     }
+    return 0;
+}
+
+/*
+ * [M5-2] CGI의 표준 입력으로 쓸 fd를 엽니다 (final.md 4.3).
+ *   POST: 본문을 임시 파일에 써 두고 처음 위치로 되감은 fd
+ *   그 밖: /dev/null (읽으면 바로 끝)
+ * 파이프 대신 임시 파일을 쓰는 이유: 파이프는 버퍼(보통 64 KiB)가 차면 쓰기가 멈춤.
+ * CGI가 stdin을 다 읽기 전에 출력부터 하면, 부모는 쓰기에서·CGI는 출력에서 서로를
+ * 기다리는 교착이 생길 수 있음. 파일에 미리 다 써 두면 부모는 기다릴 일이 없음.
+ * mkstemp 직후 unlink: 이름은 지우고 fd만 남김 → 서버가 중간에 죽어도 디스크에 안 남음.
+ * 실패하면 -1 (열어 둔 fd는 닫음)
+ */
+static int cgi_input_open(const struct http_request *req)
+{
+    char path[1024];
+    const char *dir;
+    size_t off = 0;
+    int fd;
+    int n;
+
+    if (strcmp(req->method, "POST") != 0) {
+        fd = open("/dev/null", O_RDONLY);
+        if (fd >= 0) {
+            fd_cloexec_set(fd); /* 다른 작업자의 CGI에게 새지 않게 (자식 fd 정리가 한 번 더 막음) */
+        }
+        return fd;
+    }
+
+    dir = getenv("TMPDIR"); /* 서버 어디서도 setenv를 안 하므로 스레드에서 읽어도 안전 */
+    if (dir == NULL || dir[0] == '\0') {
+        dir = "/tmp";
+    }
+    n = snprintf(path, sizeof(path), "%s/tiny-cgi-XXXXXX", dir);
+    if (n < 0 || n >= (int)sizeof(path)) {
+        return -1;
+    }
+    fd = mkstemp(path); /* 겹치지 않는 이름으로 만들고 읽기·쓰기로 염 */
+    if (fd < 0) {
+        return -1;
+    }
+    unlink(path);
+    fd_cloexec_set(fd);
+
+    while (off < req->body_len) { /* write는 일부만 쓸 수 있으므로 다 쓸 때까지 */
+        ssize_t w = write(fd, req->body + off, req->body_len - off);
+        if (w < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            close(fd);
+            return -1;
+        }
+        off += (size_t)w;
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0) { /* CGI가 처음부터 읽도록 되감기 */
+        close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 /*
@@ -910,12 +1043,19 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
  * (async-signal-safe: dup2, close, execve, _exit)만 씁니다.
  *   - setenv(내부에서 malloc) → 부모가 fork 전에 만든 envp를 execve에 넘김
  *   - Dup2, Execve(대문자 래퍼) → 실패하면 fprintf + exit를 부름 → 소문자 + _exit
+ * [M5-2] 표준 입력은 cgi_input_open이 준비한 fd(본문 임시 파일 또는 /dev/null)입니다.
  * 또 execve 전에 fd 3번 이상을 모두 닫아, 다른 손님 소켓과 리스닝 소켓이
  * CGI 프로그램에 넘어가지 않게 합니다 (FD_CLOEXEC 설정 전 틈까지 막음).
  */
-static void cgi_child_run(int fd, const char *filename, char *const envp[])
+static void cgi_child_run(int fd, int infd, const char *filename,
+                          char *const envp[])
 {
     char *argv[] = {NULL}; /* Tiny의 emptylist: CGI 프로그램에 넘길 인자 없음 */
+
+    /* [M5-2] 표준 입력(0번)을 본문 임시 파일(GET이면 /dev/null)로 돌림 */
+    if (dup2(infd, STDIN_FILENO) < 0) {
+        _exit(127);
+    }
 
     /* 표준 출력(1번)을 클라이언트 소켓으로 돌림 → printf가 곧바로 응답이 됨.
      * dup2로 만든 1번에는 FD_CLOEXEC가 없으므로 execve 뒤에도 남음 */

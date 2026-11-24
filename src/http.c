@@ -13,6 +13,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -297,6 +298,65 @@ int http_headers_validate(struct http_request *req)
         req->keep_alive = req->conn_keep_alive && !req->conn_close;
     }
     return 0;
+}
+
+int http_body_check(const struct http_request *req)
+{
+    /* "매우 큰 요청 본문"은 받기 전에 거절. 받고 나서 거절하면 이미 메모리를 씀 */
+    if (req->has_content_length && req->content_length > BODY_MAX) {
+        return 413;
+    }
+    return 0;
+}
+
+int http_expect_check(const struct http_request *req)
+{
+    /* HTTP/1.0에는 Expect가 없으므로 무시 (RFC 9110 §10.1.1) */
+    if (req->minor == 0 || req->expect == HTTP_EXPECT_NONE) {
+        return 0;
+    }
+    if (req->expect == HTTP_EXPECT_OTHER) {
+        return 417;
+    }
+    /* 100-continue: 받을 본문이 있을 때만 "보내도 된다"고 답함 */
+    if (req->has_content_length && req->content_length > 0) {
+        return HTTP_EXPECT_SEND_100;
+    }
+    return 0;
+}
+
+int http_body_read(struct http_request *req, rio_t *rp)
+{
+    size_t n;
+
+    req->body = NULL;
+    req->body_len = 0;
+    /* CL도 TE도 없으면 본문 0바이트 (RFC 9112 §6.3). TE는 validate에서 이미 거절 */
+    if (!req->has_content_length || req->content_length == 0) {
+        return 0;
+    }
+    n = (size_t)req
+            ->content_length; /* http_body_check로 BODY_MAX 이하임을 확인함 */
+    req->body = malloc(n);
+    if (req->body == NULL) {
+        return 500;
+    }
+    /* rio_readnb는 n바이트를 다 읽거나, 끊기면(EOF) 그때까지 읽은 수를 돌려주고,
+     * 오류·타임아웃이면 -1. 정확히 n바이트가 아니면 본문을 믿을 수 없음 */
+    if (rio_readnb(rp, req->body, n) != (ssize_t)n) {
+        free(req->body);
+        req->body = NULL;
+        return -1;
+    }
+    req->body_len = n;
+    return 0;
+}
+
+void http_request_free(struct http_request *req)
+{
+    free(req->body); /* NULL이면 아무 일도 안 함 */
+    req->body = NULL;
+    req->body_len = 0;
 }
 
 /* 확장자(점 뒤)와 MIME 타입. 대소문자를 구분 (지금 동작 유지) */

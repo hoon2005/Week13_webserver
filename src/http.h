@@ -10,6 +10,8 @@
  *     2. 요청 줄: http_line_check → http_request_line_parse
  *     3. 헤더 줄: 빈 줄이 올 때까지 http_line_check → http_header_line_parse
  *     4. 빈 줄 뒤: http_headers_validate (Host, Content-Length, Transfer-Encoding)
+ *     5. [M5-2] 본문: http_body_check(413) → http_expect_check(417 / 100 Continue)
+ *        → http_body_read. 요청이 끝나면 http_request_free
  *
  *   parse/validate 함수는 성공하면 0, 실패하면 보낼 HTTP 상태 코드(400, 501,
  *   505)를 돌려줍니다. 이 오류들은 모두 요청이 어디서 끝나는지 믿을 수 없는
@@ -65,7 +67,8 @@ struct http_request {
     char raw_headers[HDR_RAW_MAX];
     size_t raw_len;
 
-    char *body; /* M5-2에서 malloc. 요청이 끝나면 free */
+    char *body;      /* [M5-2] http_body_read가 malloc. 본문이 없으면 NULL */
+    size_t body_len; /* body의 바이트 수 (= Content-Length, 없으면 0) */
 };
 
 /* 구조체를 비웁니다. 요청마다 한 번 (keep-alive에서는 요청마다 다시) */
@@ -90,6 +93,25 @@ int http_header_line_parse(struct http_request *req, const char *line,
 /* 헤더를 다 읽은 뒤 서로 얽힌 규칙을 확인하고 keep_alive를 정합니다.
  * 성공 0, 실패 400(Host, CL+TE) / 501(TE만) */
 int http_headers_validate(struct http_request *req);
+
+/* [M5-2] 본문을 받기 전에 크기를 봅니다. CL > BODY_MAX면 413 (malloc 전에 거절), 아니면 0 */
+int http_body_check(const struct http_request *req);
+
+/* [M5-2] Expect 헤더 판단 (final.md 3.6). http_body_check를 통과한 뒤에 부릅니다.
+ *   0: 할 일 없음 (Expect 없음, HTTP/1.0이라 무시, 본문 0바이트)
+ *   HTTP_EXPECT_SEND_100: "100 Continue"를 보낸 뒤 본문을 읽음
+ *   417: 100-continue가 아닌 값 */
+#define HTTP_EXPECT_SEND_100 100
+int http_expect_check(const struct http_request *req);
+
+/* [M5-2] Content-Length만큼 본문을 rp에서 읽어 req->body에 담습니다.
+ * 헤더를 읽은 같은 rio여야 합니다: rio_readlineb가 미리 읽어 둔 본문 앞부분이
+ * rio 버퍼에 있을 수 있기 때문입니다. 본문이 없으면 body = NULL로 0.
+ * 끝까지 못 읽으면(끊김·타임아웃) 버퍼를 해제하고 -1, 메모리가 없으면 500 */
+int http_body_read(struct http_request *req, rio_t *rp);
+
+/* [M5-2] 요청이 잡은 메모리(body)를 해제합니다. 모든 경로에서 부름 */
+void http_request_free(struct http_request *req);
 
 /* 파일 경로의 마지막 확장자로 Content-Type 값을 정합니다 (final.md 3.7) */
 const char *http_mime_type(const char *path);
