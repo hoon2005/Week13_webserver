@@ -15,13 +15,15 @@
 #include "queue.h"
 #include <strings.h> /* strcasecmp (메서드 대소문자 무시 비교) */
 
-#define WORKER_COUNT 16 /* 미리 만들어 둘 작업자 스레드 수 */
+#define WORKER_COUNT 16     /* 미리 만들어 둘 작업자 스레드 수 */
+#define READ_TIMEOUT_SEC 5  /* 손님이 아무것도 안 보낼 때 기다리는 시간(초) */
 
 static struct queue conn_queue; /* 메인과 작업자들이 함께 쓰는 작업 큐 */
 
 /* M4 */
 static void workers_start(void);
 static void *worker_run(void *arg);
+static void read_timeout_set(int fd);
 
 /* M1 */
 static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 open_listenfd 대신 */
@@ -134,7 +136,7 @@ static void workers_start(void)
 
 /*
  * 작업자 스레드 하나가 하는 일입니다. 서버가 꺼질 때까지 반복합니다.
- * 큐에서 연결 꺼내기(없으면 대기) → 요청 처리 → 연결 닫기
+ * 큐에서 연결 꺼내기(없으면 대기) → 읽기 제한 설정 → 요청 처리 → 연결 닫기
  */
 static void *worker_run(void *arg)
 {
@@ -143,11 +145,26 @@ static void *worker_run(void *arg)
     (void)arg; /* pthread_create의 함수 모양을 맞추기 위한 인자. 쓰지 않음 */
     while (1) {
         connfd = queue_pop(&conn_queue);
+        read_timeout_set(connfd);
         doit(connfd);
         /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
         close(connfd);
     }
     return NULL;
+}
+
+/*
+ * 읽기 한 번이 READ_TIMEOUT_SEC초 넘게 걸리면 실패(-1)하게 합니다.
+ * 그러면 doit이 바로 끝나므로, 조용한 손님이 작업자를 계속 붙잡지 못합니다.
+ * 글자가 올 때마다 시간을 다시 세므로, 조금씩 계속 보내는 손님은 막지 못합니다.
+ */
+static void read_timeout_set(int fd)
+{
+    struct timeval timeout = {READ_TIMEOUT_SEC, 0}; /* 초, 마이크로초 */
+
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        perror("setsockopt");
+    }
 }
 
 /*

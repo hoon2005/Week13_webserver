@@ -81,6 +81,19 @@ class ConcurrencyTest(unittest.TestCase):
         self.open_idle(WORKER_COUNT - 1)
         self.assertEqual(self.get("/home.html", timeout=2)[0], 200)
 
+    def test_조용한_손님이_작업자를_모두_차지해도_시간이_지나면_응답을_받는다(self):
+        self.open_idle(WORKER_COUNT)
+        time.sleep(0.5)  # 작업자들이 조용한 손님을 먼저 맡게 함
+        self.assertEqual(self.get("/home.html", timeout=15)[0], 200)
+
+    def test_5초_동안_아무것도_안_보내면_연결이_닫힌다(self):
+        with socket.create_connection((HOST, self.port), timeout=15) as sock:
+            start = time.monotonic()
+            self.assertEqual(sock.recv(1), b"")
+            elapsed = time.monotonic() - start
+        self.assertGreater(elapsed, 4)
+        self.assertLess(elapsed, 10)
+
     def test_파일_요청_100개를_동시에_보내도_모두_같은_내용을_받는다(self):
         with open(os.path.join(FIXTURE_DIR, "home.html"), "rb") as f:
             expected = f.read()
