@@ -6,11 +6,13 @@
 
 import os
 import statistics
+import subprocess
 import sys
 import time
 import unittest
+from unittest import mock
 
-from phase2_test import Server, exchange, get, read_response
+from phase2_test import BUILD_DIR, Server, exchange, get, read_response
 
 
 class RequestCheckTest(unittest.TestCase):
@@ -249,6 +251,53 @@ class AdderRangeTest(unittest.TestCase):
                     status, _, body, _ = get(server, "/cgi-bin/adder?" + query)
                     self.assertEqual(status, 200)
                     self.assertIn(expected, body)
+        finally:
+            server.stop()
+
+
+class SmallFixTest(unittest.TestCase):
+    def test_포트가_1에서_65535_숫자가_아니면_시작하지_않는다(self):
+        tiny = os.path.join(BUILD_DIR, "tiny")
+        for port in ("abc", "0", "65536", "99999", "80x", "-1", "", " 80"):
+            with self.subTest(port=port):
+                proc = subprocess.run(
+                    [tiny, port], capture_output=True, text=True, timeout=5)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("usage", proc.stderr)
+
+    def test_오류_페이지에_URI의_HTML_글자가_그대로_나오지_않는다(self):
+        server = Server("--timeout", "1")
+        try:
+            _, _, body, _ = get(server, "/<script>alert(1)</script>&\"")
+            self.assertNotIn(b"<script>", body)
+            self.assertIn(b"&lt;script&gt;alert(1)&lt;/script&gt;&amp;&quot;", body)
+            # 바꾸면 길어지는 URI도 응답 길이가 맞음
+            status, headers, body, _ = get(server, "/" + "<" * 5000)
+            self.assertEqual(status, 404)
+            self.assertEqual(len(body), int(headers["content-length"]))
+        finally:
+            server.stop()
+
+    def test_긴_PATH도_잘리지_않고_CGI에_전달된다(self):
+        long_path = ":".join("/dir%04d" % i for i in range(300)) + ":" + os.environ["PATH"]
+        with mock.patch.dict(os.environ, {"PATH": long_path}):
+            server = Server("--timeout", "1")
+        try:
+            path = os.path.join(server.www, "cgi-bin", "path")
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\nprintf 'Content-Type: text/plain\\n\\n%s' \"$PATH\"\n")
+            os.chmod(path, 0o755)
+            self.assertEqual(get(server, "/cgi-bin/path")[2].decode(), long_path)
+        finally:
+            server.stop()
+
+    def test_잘못된_메서드_글자는_400이고_모르는_메서드는_501이다(self):
+        server = Server("--timeout", "1")
+        try:
+            for method, expected in ((b"G@T", 400), (b"FOO", 501)):
+                status, _, _, _ = exchange(
+                    server, method + b" / HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertEqual(status, expected)
         finally:
             server.stop()
 

@@ -54,7 +54,7 @@ int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
 
 /* 실행 인자로 정하는 값. main이 작업자를 만들기 전에 채우고 이후에는 읽기만 함 */
 struct server_config {
-    const char *port;
+    int port;
     const char *root;  /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
     int threads;       /* 작업자 수 */
     int queue;         /* 작업 큐 크기 */
@@ -62,11 +62,10 @@ struct server_config {
     int keepalive_max; /* 연결당 요청 수 상한 */
     int proxy_timeout; /* 백엔드 시간 제한(초) */
     long open_max;     /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
-    char path_env[1024]; /* CGI에 넘길 PATH=... */
+    char *path_env; /* CGI에 넘길 PATH=... */
 };
 
 static struct server_config cfg = {
-    .port = NULL,
     .root = NULL,
     .threads = 16,
     .queue = 64,
@@ -114,12 +113,25 @@ static int positive_int_arg(const char *prog, const char *s)
     return (int)v;
 }
 
+/* 포트 인자 해석: 1~65535 숫자만. 잘못되면 usage */
+static int port_arg(const char *prog, const char *s)
+{
+    size_t digits = strspn(s, "0123456789");
+    long v = strtol(s, NULL, 10);
+
+    if (digits == 0 || s[digits] != '\0' || v < 1 || v > 65535) {
+        usage(prog);
+    }
+    return (int)v;
+}
+
 static void config_parse(int argc, char **argv)
 {
-    if (argc < 2 || strncmp(argv[1], "--", 2) == 0) {
+    if (argc < 2) {
         usage(argv[0]);
     }
-    cfg.port = argv[1]; /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
+    /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
+    cfg.port = port_arg(argv[0], argv[1]);
     for (int i = 2; i < argc; i += 2) {
         if (i + 1 >= argc) {
             usage(argv[0]);
@@ -158,7 +170,7 @@ enum conn_next {
     CONN_RESET          /* 길이 없는 응답이 잘림 → RST로 끊어 알림 */
 };
 
-static int listen_socket_open(const char *port);
+static int listen_socket_open(int port);
 static int accept_cloexec(int listenfd);
 static void socket_options_set(int connfd);
 static void *worker_main(void *arg);
@@ -174,6 +186,7 @@ int main(int argc, char **argv)
     pthread_t signal_thread;
     static sigset_t stop_signals; /* 시그널 스레드가 계속 쓰므로 static */
     const char *path;
+    size_t path_size;
     int listenfd;
 
     config_parse(argc, argv);
@@ -199,8 +212,14 @@ int main(int argc, char **argv)
         cfg.open_max = 65536;
     }
     path = getenv("PATH");
-    snprintf(cfg.path_env, sizeof(cfg.path_env), "PATH=%s",
-             path ? path : "/usr/bin:/bin");
+    path = path ? path : "/usr/bin:/bin";
+    path_size = strlen("PATH=") + strlen(path) + 1;
+    cfg.path_env = malloc(path_size);
+    if (cfg.path_env == NULL) {
+        fprintf(stderr, "PATH를 복사하지 못했습니다\n");
+        exit(1);
+    }
+    snprintf(cfg.path_env, path_size, "PATH=%s", path);
 
     listenfd = listen_socket_open(cfg.port);
     if (listenfd < 0) {
@@ -276,6 +295,7 @@ int main(int argc, char **argv)
     }
     free(workers);
     free(cgi_pids);
+    free(cfg.path_env);
     conn_queue_destroy(&queue);
     route_table_destroy(&routes);
     printf("종료 완료\n");
@@ -337,7 +357,7 @@ static void *worker_main(void *arg)
  * 리스닝 소켓에 FD_CLOEXEC를 걸어 CGI가 물려받지 않게 함 (final.md 2.6).
  * 작업자를 만들기 전에 부르므로 socket과 fcntl 사이에 fork하는 스레드가 없음.
  */
-static int listen_socket_open(const char *port)
+static int listen_socket_open(int port)
 {
     struct sockaddr_in addr;
     int listenfd;
@@ -365,7 +385,7 @@ static int listen_socket_open(const char *port)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons((unsigned short)atoi(port));
+    addr.sin_port = htons((unsigned short)port);
     if (bind(listenfd, (SA *)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(listenfd);
@@ -480,6 +500,29 @@ static int response_head_send(int fd, int status, const char *reason,
     return write_all(fd, header, (size_t)n);
 }
 
+/* 오류 페이지에 넣을 글자를 HTML 태그로 해석되지 않게 바꿈. 길면 자름 */
+static void html_escape(char *dst, size_t size, const char *src)
+{
+    size_t used = 0;
+
+    dst[0] = '\0';
+    for (; *src != '\0'; src++) {
+        char one[2] = {*src, '\0'};
+        const char *s = *src == '<'   ? "&lt;"
+                        : *src == '>' ? "&gt;"
+                        : *src == '&' ? "&amp;"
+                        : *src == '"' ? "&quot;"
+                                      : one;
+        size_t n = strlen(s);
+
+        if (used + n >= size) {
+            break;
+        }
+        memcpy(dst + used, s, n + 1);
+        used += n;
+    }
+}
+
 /*
  * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
  * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *next를 바로 닫기로.
@@ -489,16 +532,18 @@ static int error_reply(int fd, const struct http_request *req, int status,
                        const char *cause, const char *longmsg, enum conn_next *next)
 {
     char body[MAXBUF];
+    char safe_cause[MAXBUF / 2];
     int body_len;
     int send_body = !(req != NULL && strcmp(req->method, "HEAD") == 0);
 
+    html_escape(safe_cause, sizeof(safe_cause), cause);
     body_len = snprintf(body, sizeof(body),
                         "<html><title>Tiny Error</title>"
                         "<body bgcolor=ffffff>\r\n"
                         "%d: %s\r\n"
                         "<p>%s: %s\r\n"
                         "<hr><em>The Tiny Web server</em>\r\n",
-                        status, http_status_text(status), longmsg, cause);
+                        status, http_status_text(status), longmsg, safe_cause);
     if (body_len >= (int)sizeof(body)) {
         body_len = sizeof(body) - 1;
     }

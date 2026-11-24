@@ -77,6 +77,18 @@ static int host_is_valid(const char *v)
     return *v == '\0';
 }
 
+/* 메서드 이름에 쓸 수 있는 글자로만 되어 있으면 1 (RFC 9110의 token) */
+static int is_token(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!isalnum((unsigned char)s[i]) &&
+            strchr("!#$%&'*+-.^_`|~", s[i]) == NULL) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* "HTTP/x.y" 형식이면 0, 아니면 -1. 맞으면 major, minor를 채움 */
 static int version_parse(const char *v, int *major, int *minor)
 {
@@ -155,7 +167,12 @@ int http_parse_request_line(struct http_request *req, const char *line,
     memcpy(req->uri, tok[1], tok_len[1]);
     req->uri[tok_len[1]] = '\0';
 
-    /* 메서드: GET, POST, HEAD만. 대소문자는 Phase 1처럼 구분하지 않음 */
+    /* 메서드: 쓸 수 없는 글자가 있으면 형식 오류(400), 형식은 맞지만 모르는
+     * 메서드면 501 */
+    if (!is_token(tok[0], tok_len[0])) {
+        return 400;
+    }
+    /* GET, POST, HEAD만. 대소문자는 Phase 1처럼 구분하지 않음 */
     if (tok_len[0] >= HTTP_METHOD_MAX) {
         return 501;
     }

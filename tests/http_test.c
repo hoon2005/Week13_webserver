@@ -383,6 +383,25 @@ static void test_filter_reports_small_buffer(void)
     TEST_CHECK(http_headers_filter("Abcd: 1\r\n", 9, none, out, 8) == -1);
 }
 
+static void test_method_format(void)
+{
+    static const char *const bad[] = {
+        "G@T / HTTP/1.1\r\n", "G/T / HTTP/1.1\r\n", "GET: / HTTP/1.1\r\n",
+        "\"GET\" / HTTP/1.1\r\n"};
+    static const char *const unknown[] = {"FOO / HTTP/1.1\r\n",
+                                          "M-SEARCH / HTTP/1.1\r\n",
+                                          "GETGETGETGETGETGET / HTTP/1.1\r\n"};
+    struct http_request *req = new_request();
+
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TEST_CHECK_(parse_line(req, bad[i]) == 400, "%s", bad[i]);
+    }
+    for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); i++) {
+        TEST_CHECK_(parse_line(req, unknown[i]) == 501, "%s", unknown[i]);
+    }
+    free(req);
+}
+
 TEST_LIST = {
     {"request_line_ok", test_request_line_ok},
     {"request_line_errors", test_request_line_errors},
@@ -398,6 +417,8 @@ TEST_LIST = {
     {"줄 중간에 CR이 있으면 400이다", test_cr_inside_line_is_rejected},
     {"/로 시작하지 않는 URI는 400이다", test_uri_must_start_with_slash},
     {"Host는 이름[:포트] 형식만 받고 나머지는 400이다", test_host_format},
+    {"메서드에 쓸 수 없는 글자가 있으면 400, 모르는 메서드면 501이다",
+     test_method_format},
     {"헤더 블록을 한 줄씩 이름과 값으로 나눈다", test_header_next_splits_lines},
     {"형식이 틀린 헤더 줄은 오류다", test_header_next_rejects_bad_lines},
     {"한 구간 전용 헤더와 Connection에 적힌 헤더를 뺀다",
