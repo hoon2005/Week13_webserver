@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" role="img" aria-labelledby="title desc">
+  <title id="title">M5와 M7의 요청 줄·헤더 마감 비교</title>
+  <desc id="desc">클라이언트가 4초마다 바이트를 전송한다. M5에서는 매 도착 뒤 무수신 제한을 다시 세므로 작업 스레드가 계속 점유된다. M7에서는 첫 바이트부터 10초가 지나면 연결을 닫아 다음 연결을 처리할 수 있다.</desc>
+  <style>
+    text { font-family: "Noto Sans CJK KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; fill: #18263a; }
+    .label { font-size: 23px; font-weight: 700; }
+    .detail { font-size: 19px; fill: #43556c; }
+    .tick { font-size: 19px; fill: #43556c; }
+  </style>
+  <rect width="1000" height="430" rx="22" fill="#f8fafc"/>
+  <text x="36" y="49" class="label">클라이언트가 4초마다 한 바이트씩 전송</text>
+  <text x="36" y="113" class="detail">바이트 전송 시점</text>
+  <g stroke="#ccd7e5" stroke-width="1.7" stroke-dasharray="5 6">
+    <path d="M230 106 V350 M390 106 V350 M550 106 V350 M710 106 V350 M870 106 V350"/>
+  </g>
+  <g fill="#326bd4">
+    <circle cx="230" cy="106" r="7"/><circle cx="390" cy="106" r="7"/>
+    <circle cx="550" cy="106" r="7"/><circle cx="710" cy="106" r="7"/>
+    <circle cx="870" cy="106" r="7"/>
+  </g>
+
+  <text x="36" y="177" class="label">M5</text>
+  <text x="36" y="203" class="detail">무수신 제한</text>
+  <path d="M242 154 H908 L940 185.5 L908 217 H242 Q230 217 230 205 V166 Q230 154 242 154 Z" fill="#fce9cf" stroke="#e9bf87" stroke-width="2"/>
+  <text x="560" y="192" text-anchor="middle" class="label" style="fill:#865010">작업 스레드 계속 점유</text>
+
+  <text x="36" y="277" class="label">M7</text>
+  <text x="36" y="303" class="detail">전체 마감 추가</text>
+  <rect x="230" y="254" width="400" height="63" rx="12" fill="#e8f0ff" stroke="#abc5fa" stroke-width="2"/>
+  <text x="430" y="292" text-anchor="middle" class="label" style="fill:#255bb0">작업 스레드 점유</text>
+  <rect x="630" y="254" width="310" height="63" rx="12" fill="#e4f5f1" stroke="#9bcfc3" stroke-width="2"/>
+  <text x="785" y="292" text-anchor="middle" class="label" style="fill:#086f60">다음 연결 처리 가능</text>
+  <path d="M630 238 V350" stroke="#c64242" stroke-width="3" stroke-dasharray="8 5"/>
+  <text x="644" y="241" class="detail" style="fill:#a23131">요청 줄·헤더 전체 마감</text>
+
+  <path d="M230 350 H940" stroke="#77869a" stroke-width="2"/>
+  <g text-anchor="middle" class="tick">
+    <text x="230" y="382">0초</text><text x="390" y="382">4초</text>
+    <text x="550" y="382">8초</text><text x="630" y="382" style="fill:#a23131;font-weight:700">10초</text>
+    <text x="710" y="382">12초</text><text x="870" y="382">16초</text>
+  </g>
+</svg>

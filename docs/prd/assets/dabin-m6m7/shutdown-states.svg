@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+  <title id="title">M7 정상 종료와 강제 종료 상태</title>
+  <desc id="desc">첫 종료 신호가 오면 새 연결 수락을 멈추고 진행 중인 요청과 큐의 연결을 처리한다. 이 상태에서 추가 SIGINT가 오면 CGI를 정리하고 코드 1로 끝난다. 작업 스레드가 모두 끝나면 시그널 스레드와 자원을 정리하고 코드 0으로 끝난다.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#66778c"/>
+    </marker>
+    <marker id="abort-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#b64646"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: "Noto Sans CJK KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; fill: #18263a; }
+    .label { font-size: 23px; font-weight: 700; }
+    .detail { font-size: 19px; fill: #43556c; }
+    .arrow { fill: none; stroke: #66778c; stroke-width: 2.5; marker-end: url(#arrow); }
+  </style>
+  <rect width="1000" height="520" rx="22" fill="#f8fafc"/>
+
+  <rect x="38" y="32" width="490" height="62" rx="15" fill="#e8f0ff" stroke="#abc5fa" stroke-width="2"/>
+  <text x="283" y="72" text-anchor="middle" class="label">운영 중</text>
+  <path class="arrow" d="M283 95 V136"/>
+  <text x="305" y="119" class="detail">첫 종료 신호 수신</text>
+
+  <rect x="38" y="139" width="490" height="113" rx="15" fill="#fff1d9" stroke="#e5bd77" stroke-width="2"/>
+  <text x="283" y="177" text-anchor="middle" class="label" style="fill:#8b520e">정리 중</text>
+  <text x="283" y="207" text-anchor="middle" class="detail">새 연결 수락 중단 · 진행 중인 요청 마무리</text>
+  <text x="283" y="233" text-anchor="middle" class="detail">연결 큐에 남은 연결마다 요청 하나 처리</text>
+
+  <path d="M529 196 H716 V224" fill="none" stroke="#b64646" stroke-width="2.5" stroke-dasharray="6 5" marker-end="url(#abort-arrow)"/>
+  <text x="552" y="181" class="detail" style="fill:#a23131">추가 SIGINT 수신</text>
+  <rect x="568" y="227" width="394" height="100" rx="15" fill="#fff0ef" stroke="#e8a6a2" stroke-width="2"/>
+  <text x="765" y="268" text-anchor="middle" class="label" style="fill:#a23131">강제 종료 · 코드 1</text>
+  <text x="765" y="299" text-anchor="middle" class="detail">관리 중인 CGI를 종료</text>
+
+  <path class="arrow" d="M283 253 V295"/>
+  <text x="305" y="278" class="detail">작업 스레드 join 완료</text>
+  <rect x="38" y="298" width="490" height="91" rx="15" fill="#e4f5f1" stroke="#9bcfc3" stroke-width="2"/>
+  <text x="283" y="335" text-anchor="middle" class="label" style="fill:#086f60">작업 스레드 정리 완료</text>
+  <text x="283" y="365" text-anchor="middle" class="detail">finished 설정 · 시그널 스레드 종료 대기</text>
+  <path class="arrow" d="M283 390 V432"/>
+  <text x="305" y="415" class="detail">자원 해제</text>
+  <rect x="38" y="435" width="490" height="56" rx="15" fill="#e4f5f1" stroke="#9bcfc3" stroke-width="2"/>
+  <text x="283" y="471" text-anchor="middle" class="label" style="fill:#086f60">정상 종료 · 코드 0</text>
+</svg>
