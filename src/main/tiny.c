@@ -110,11 +110,18 @@ static void config_parse(int argc, char **argv)
 
 /* ============================== M1 + M4: 소켓과 스레드 풀 ============================== */
 
+/* 요청 하나를 마친 뒤 연결을 어떻게 할지 */
+enum conn_next {
+    CONN_KEEP,          /* 다음 요청을 기다림 */
+    CONN_CLOSE_REPLIED, /* 응답을 다 보냄 → 남은 데이터를 비우고 닫음 */
+    CONN_CLOSE_NOW      /* 응답 없이, 또는 보내다 실패해서 바로 닫음 */
+};
+
 static int listen_socket_open(const char *port);
 static int accept_cloexec(int listenfd);
 static void socket_options_set(int connfd);
 static void *worker_main(void *arg);
-static int serve_connection(int connfd);
+static enum conn_next serve_connection(int connfd);
 static void connection_close_lingering(int connfd);
 
 int main(int argc, char **argv)
@@ -202,8 +209,8 @@ static void *worker_main(void *arg)
     int connfd;
 
     while ((connfd = conn_queue_pop(queue)) >= 0) {
-        if (serve_connection(connfd)) {
-            connection_close_lingering(connfd); /* 응답을 보내고 닫는 경우 */
+        if (serve_connection(connfd) == CONN_CLOSE_REPLIED) {
+            connection_close_lingering(connfd);
         }
         close(connfd);
     }
@@ -310,7 +317,7 @@ static int write_all(int fd, const void *buf, size_t n)
  */
 static int response_head_send(int fd, int status, const char *reason,
                               const char *content_type, const char *extra,
-                              long length, int keep)
+                              long length, enum conn_next next)
 {
     char header[MAXBUF * 2];
     char type_line[HTTP_FIELD_MAX + 32] = "";
@@ -333,7 +340,7 @@ static int response_head_send(int fd, int status, const char *reason,
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
                  extra ? extra : "", length_line,
-                 keep ? "keep-alive" : "close");
+                 next == CONN_KEEP ? "keep-alive" : "close");
     if (n < 0 || n >= (int)sizeof(header)) {
         return -1;
     }
@@ -342,11 +349,11 @@ static int response_head_send(int fd, int status, const char *reason,
 
 /*
  * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
- * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 0으로.
+ * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *next를 바로 닫기로.
  * 보낸 상태 코드를 돌려줌 (로그용).
  */
 static int error_reply(int fd, const struct http_request *req, int status,
-                       const char *cause, const char *longmsg, int *keep)
+                       const char *cause, const char *longmsg, enum conn_next *next)
 {
     char body[MAXBUF];
     int body_len;
@@ -363,9 +370,9 @@ static int error_reply(int fd, const struct http_request *req, int status,
         body_len = sizeof(body) - 1;
     }
     if (response_head_send(fd, status, NULL, "text/html", NULL, body_len,
-                           *keep) < 0 ||
+                           *next) < 0 ||
         (send_body && write_all(fd, body, (size_t)body_len) < 0)) {
-        *keep = 0;
+        *next = CONN_CLOSE_NOW;
     }
     return status;
 }
@@ -380,16 +387,9 @@ static void request_log(const struct http_request *req, int status)
 
 /* ============================== M5: 연결과 요청 처리 ============================== */
 
-/* request_handle의 결과: 연결을 어떻게 할지 */
-enum conn_next {
-    CONN_CLOSE_SILENT = 0, /* 응답 없이 닫음 (끊김, 타임아웃) */
-    CONN_KEEP = 1,         /* 다음 요청을 기다림 */
-    CONN_CLOSE_REPLIED = 2 /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
-};
-
 static long now_ms(void);
-static int request_handle(int fd, rio_t *rio, int can_keep);
-static int request_route(int fd, struct http_request *req, int *keep);
+static enum conn_next request_handle(int fd, rio_t *rio, int can_keep);
+static int request_route(int fd, struct http_request *req, enum conn_next *next);
 
 /*
  * 연결 하나를 처리합니다 (final.md 5.1).
@@ -397,19 +397,16 @@ static int request_route(int fd, struct http_request *req, int *keep);
  *   rio 버퍼에 들어와 있을 수 있어서, 요청마다 새로 만들면 그 데이터를 잃음.
  *   이 연결의 요청 수가 --keepalive-max에 닿으면 그 응답에 Connection: close.
  */
-static int serve_connection(int connfd)
+static enum conn_next serve_connection(int connfd)
 {
     rio_t rio;
-    int next;
+    enum conn_next next = CONN_KEEP;
 
     rio_readinitb(&rio, connfd);
-    for (int n = 1;; n++) {
+    for (int n = 1; next == CONN_KEEP; n++) {
         next = request_handle(connfd, &rio, n < cfg.keepalive_max);
-        if (next != CONN_KEEP) {
-            break;
-        }
     }
-    return next == CONN_CLOSE_REPLIED; /* 1이면 닫기 전에 남은 데이터를 비움 */
+    return next;
 }
 
 /*
@@ -462,62 +459,61 @@ static void connection_close_lingering(int connfd)
  * 요청 하나를 읽고 응답합니다. 반환은 enum conn_next.
  * 한 줄 규칙: 요청을 끝까지 읽었고 응답 길이를 알면 유지, 아니면 닫음 (5.2)
  */
-static int request_handle(int fd, rio_t *rio, int can_keep)
+static enum conn_next request_handle(int fd, rio_t *rio, int can_keep)
 {
     struct http_request req;
     char line[MAXLINE];
     ssize_t n;
     long body_len;
     int status;
-    int keep = 0;
+    enum conn_next next = CONN_CLOSE_REPLIED;
 
     http_request_init(&req);
 
     /* 1. 요청 줄. 0(클라이언트가 끊음)이나 -1(읽기 타임아웃)이면 조용히 닫음 */
     n = rio_readlineb(rio, line, MAXLINE);
     if (n <= 0) {
-        return CONN_CLOSE_SILENT;
+        return CONN_CLOSE_NOW;
     }
     status = http_parse_request_line(&req, line, (size_t)n, MAXLINE);
     if (status != 0) { /* 414, 400, 505, 501: 본문 경계를 모르므로 닫음 */
         error_reply(fd, &req, status, "request line", "Bad request line",
-                    &keep);
+                    &next);
         request_log(&req, status);
-        return CONN_CLOSE_REPLIED;
+        return next;
     }
 
     /* 2. 헤더: 빈 줄까지 "이름: 값" → 구조체 + 원본 블록 */
     while (1) {
         n = rio_readlineb(rio, line, MAXLINE);
         if (n <= 0) {
-            return CONN_CLOSE_SILENT; /* 헤더 도중 끊김, 타임아웃 */
+            return CONN_CLOSE_NOW; /* 헤더 도중 끊김, 타임아웃 */
         }
         status = http_parse_header_line(&req, line, (size_t)n, MAXLINE);
         if (status == 1) {
             break;
         }
         if (status != 0) {
-            error_reply(fd, &req, status, "header", "Bad header", &keep);
+            error_reply(fd, &req, status, "header", "Bad header", &next);
             request_log(&req, status);
-            return CONN_CLOSE_REPLIED;
+            return next;
         }
     }
 
     /* 3. 헤더 검사: Host, CL+TE, TE, 413, 417 */
     status = http_finish_headers(&req);
     if (status != 0) {
-        error_reply(fd, &req, status, req.uri, "Request rejected", &keep);
+        error_reply(fd, &req, status, req.uri, "Request rejected", &next);
         request_log(&req, status);
-        return CONN_CLOSE_REPLIED;
+        return next;
     }
-    keep = req.keep_alive && can_keep;
     body_len = http_body_length(&req);
 
     /* 4. Expect: 100-continue면 본문을 받기 전에 계속 보내라고 알림 (3.6) */
     if (req.expect == HTTP_EXPECT_CONTINUE && body_len > 0) {
         static const char cont[] = "HTTP/1.1 100 Continue\r\n\r\n";
         if (write_all(fd, cont, sizeof(cont) - 1) < 0) {
-            return CONN_CLOSE_SILENT;
+            return CONN_CLOSE_NOW;
         }
     }
 
@@ -525,24 +521,26 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     if (body_len > 0) {
         req.body = malloc((size_t)body_len);
         if (req.body == NULL) {
-            keep = 0;
-            error_reply(fd, &req, 500, req.uri, "Out of memory", &keep);
+            error_reply(fd, &req, 500, req.uri, "Out of memory", &next);
             request_log(&req, 500);
-            return CONN_CLOSE_REPLIED;
+            return next;
         }
         n = rio_readnb(rio, req.body, (size_t)body_len);
         if (n != (ssize_t)body_len) { /* 도중에 끊김, 타임아웃: 응답 없이 닫음 */
             http_request_free(&req);
-            return CONN_CLOSE_SILENT;
+            return CONN_CLOSE_NOW;
         }
         req.body_len = (size_t)body_len;
     }
 
     /* 6. 경로 확인 → 정적 파일 / CGI → 응답 */
-    status = request_route(fd, &req, &keep);
+    if (req.keep_alive && can_keep) {
+        next = CONN_KEEP;
+    }
+    status = request_route(fd, &req, &next);
     request_log(&req, status);
     http_request_free(&req);
-    return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+    return next;
 }
 
 /* ============================== M2: 경로 확인 (Phase 1에서 이어짐) ============================== */
@@ -559,12 +557,12 @@ static int path_is_allowed(const char *path, size_t len);
 static enum uri_target uri_parse(const char *uri, char *filename,
                                  char *cgiargs);
 static int static_serve(int fd, const struct http_request *req,
-                        const char *filename, off_t filesize, int *keep);
+                        const char *filename, off_t filesize, enum conn_next *next);
 static int cgi_serve(int fd, const struct http_request *req,
-                     const char *filename, const char *cgiargs, int *keep);
+                     const char *filename, const char *cgiargs, enum conn_next *next);
 
 /* 요청을 정적 파일 / CGI로 보냄. 보낸 상태 코드를 돌려줌 */
-static int request_route(int fd, struct http_request *req, int *keep)
+static int request_route(int fd, struct http_request *req, enum conn_next *next)
 {
     char filename[MAXLINE], cgiargs[MAXLINE];
     struct stat sbuf;
@@ -572,38 +570,38 @@ static int request_route(int fd, struct http_request *req, int *keep)
 
     if (target == URI_FORBIDDEN) {
         return error_reply(fd, req, 403, req->uri,
-                           "Tiny doesn't serve this path", keep);
+                           "Tiny doesn't serve this path", next);
     }
     if (target == URI_TOO_LONG) {
-        *keep = 0;
-        return error_reply(fd, req, 414, req->uri, "Path too long", keep);
+        *next = CONN_CLOSE_REPLIED;
+        return error_reply(fd, req, 414, req->uri, "Path too long", next);
     }
     if (stat(filename, &sbuf) < 0) {
         return error_reply(fd, req, 404, filename,
-                           "Tiny couldn't find this file", keep);
+                           "Tiny couldn't find this file", next);
     }
 
     if (target == URI_STATIC) {
         if (strcmp(req->method, "POST") == 0) { /* 정적 파일 POST: 501 유지 */
             return error_reply(fd, req, 501, req->method,
-                               "Tiny does not implement this method", keep);
+                               "Tiny does not implement this method", next);
         }
         if (!S_ISREG(sbuf.st_mode) || !(S_IRUSR & sbuf.st_mode)) {
             return error_reply(fd, req, 403, filename,
-                               "Tiny couldn't read the file", keep);
+                               "Tiny couldn't read the file", next);
         }
-        return static_serve(fd, req, filename, sbuf.st_size, keep);
+        return static_serve(fd, req, filename, sbuf.st_size, next);
     }
 
     if (strcmp(req->method, "HEAD") == 0) { /* CGI에 HEAD: 501 */
         return error_reply(fd, req, 501, req->method,
-                           "Tiny does not implement HEAD for CGI", keep);
+                           "Tiny does not implement HEAD for CGI", next);
     }
     if (!S_ISREG(sbuf.st_mode) || !(S_IXUSR & sbuf.st_mode)) {
         return error_reply(fd, req, 403, filename,
-                           "Tiny couldn't run the CGI program", keep);
+                           "Tiny couldn't run the CGI program", next);
     }
-    return cgi_serve(fd, req, filename, cgiargs, keep);
+    return cgi_serve(fd, req, filename, cgiargs, next);
 }
 
 /*
@@ -672,7 +670,7 @@ static enum uri_target uri_parse(const char *uri, char *filename,
  * MIME은 마지막 확장자로 판단 (3.7).
  */
 static int static_serve(int fd, const struct http_request *req,
-                        const char *filename, off_t filesize, int *keep)
+                        const char *filename, off_t filesize, enum conn_next *next)
 {
     int srcfd;
     char *srcp = NULL;
@@ -681,22 +679,22 @@ static int static_serve(int fd, const struct http_request *req,
     srcfd = open(filename, O_RDONLY, 0);
     if (srcfd < 0) {
         return error_reply(fd, req, 500, filename,
-                           "Tiny couldn't open the file", keep);
+                           "Tiny couldn't open the file", next);
     }
     if (filesize > 0 && send_body) {
         srcp = mmap(0, (size_t)filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
         if (srcp == MAP_FAILED) {
             close(srcfd);
             return error_reply(fd, req, 500, filename,
-                               "Tiny couldn't map the file", keep);
+                               "Tiny couldn't map the file", next);
         }
     }
     close(srcfd);
 
     if (response_head_send(fd, 200, NULL, http_mime_type(filename), NULL,
-                           (long)filesize, *keep) < 0 ||
+                           (long)filesize, *next) < 0 ||
         (srcp != NULL && write_all(fd, srcp, (size_t)filesize) < 0)) {
-        *keep = 0; /* 응답을 보내다 실패하면 바로 닫음 */
+        *next = CONN_CLOSE_NOW; /* 응답을 보내다 실패하면 바로 닫음 */
     }
     if (srcp != NULL) {
         munmap(srcp, (size_t)filesize);
@@ -913,7 +911,7 @@ static int cgi_status_parse(const struct http_header *h, int *status,
  *   나눠 쓴 본문을 일반 본문인 것처럼 내보낼 수 있음)
  */
 static int cgi_reply(int fd, const struct http_request *req, const char *out,
-                     size_t len, int *keep)
+                     size_t len, enum conn_next *next)
 {
     static const char *const skip[] = {"Status", "Content-Length", NULL};
     char extra[MAXBUF];
@@ -940,25 +938,25 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
     }
     if (len == 0 || !found) {
         return error_reply(fd, req, 500, req->uri,
-                           "CGI output has no header", keep);
+                           "CGI output has no header", next);
     }
 
     while ((rc = http_header_next(out, hdr_end, &pos, &h)) == 1) {
         if (http_header_is(&h, "Transfer-Encoding")) {
             return error_reply(fd, req, 500, req->uri,
-                               "CGI output has Transfer-Encoding", keep);
+                               "CGI output has Transfer-Encoding", next);
         }
         if (http_header_is(&h, "Status") &&
             cgi_status_parse(&h, &status, reason, sizeof(reason)) < 0) {
             return error_reply(fd, req, 500, req->uri,
-                               "Malformed CGI status", keep);
+                               "Malformed CGI status", next);
         }
     }
     extra_len = http_headers_filter(out, hdr_end, skip, extra,
                                     sizeof(extra) - 1);
     if (rc < 0 || extra_len < 0) {
         return error_reply(fd, req, 500, req->uri, "Malformed CGI header",
-                           keep);
+                           next);
     }
     extra[extra_len] = '\0';
 
@@ -968,10 +966,10 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
     }
     if (response_head_send(fd, status, reason, NULL, extra,
                            (status == 204 || status == 304) ? -1 : body_len,
-                           *keep) < 0 ||
+                           *next) < 0 ||
         (body_len > 0 &&
          write_all(fd, out + body_start, (size_t)body_len) < 0)) {
-        *keep = 0;
+        *next = CONN_CLOSE_NOW;
     }
     return status;
 }
@@ -984,7 +982,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
  *   부모: 출력을 모아(1 MiB, 10초) 응답 생성. 실패 500, 시간 초과 504
  */
 static int cgi_serve(int fd, const struct http_request *req,
-                     const char *filename, const char *cgiargs, int *keep)
+                     const char *filename, const char *cgiargs, enum conn_next *next)
 {
     char env_method[32], env_query[MAXLINE + 16], env_length[48];
     char env_type[HTTP_FIELD_MAX + 16], env_protocol[48];
@@ -1025,11 +1023,11 @@ static int cgi_serve(int fd, const struct http_request *req,
     /* 2. 입력 (임시 파일 또는 /dev/null), 출력 파이프 */
     infd = cgi_input_open(req);
     if (infd < 0) {
-        return error_reply(fd, req, 500, filename, "CGI input failed", keep);
+        return error_reply(fd, req, 500, filename, "CGI input failed", next);
     }
     if (pipe(pipefd) < 0) {
         close(infd);
-        return error_reply(fd, req, 500, filename, "CGI pipe failed", keep);
+        return error_reply(fd, req, 500, filename, "CGI pipe failed", next);
     }
     fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
     fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
@@ -1040,7 +1038,7 @@ static int cgi_serve(int fd, const struct http_request *req,
         close(infd);
         close(pipefd[0]);
         close(pipefd[1]);
-        return error_reply(fd, req, 500, filename, "CGI fork failed", keep);
+        return error_reply(fd, req, 500, filename, "CGI fork failed", next);
     }
     if (pid == 0) { /* 자식: async-signal-safe 함수만 */
         if (dup2(infd, STDIN_FILENO) < 0 ||
@@ -1060,13 +1058,13 @@ static int cgi_serve(int fd, const struct http_request *req,
 
     if (result == CGI_TIMEOUT) {
         return error_reply(fd, req, 504, filename,
-                           "CGI program did not finish in time", keep);
+                           "CGI program did not finish in time", next);
     }
     if (result == CGI_FAILED) {
         return error_reply(fd, req, 500, filename, "CGI program failed",
-                           keep);
+                           next);
     }
-    status = cgi_reply(fd, req, out, out_len, keep);
+    status = cgi_reply(fd, req, out, out_len, next);
     free(out);
     return status;
 }
