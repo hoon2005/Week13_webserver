@@ -11,9 +11,17 @@
  *   Phase 2 M4-2: 스레드 풀로 동시에 처리합니다. main은 accept한 연결을 작업
  *   큐(conn_queue.c)에 넣기만 하고, 미리 만든 작업자 N개가 꺼내 처리합니다.
  *   (M4-1의 연결당 스레드 버전은 부하 측정 비교 기준으로 그 커밋에 남아 있습니다)
+ *   Phase 2 M4-3: 접속 소켓에 읽기·쓰기 타임아웃을 걸고, CGI 자식이 다른 손님
+ *   소켓과 리스닝 소켓을 물려받지 않게 막고(FD_CLOEXEC + 자식 fd 정리),
+ *   자식은 fork 뒤에 malloc을 쓰는 함수(setenv 등)를 부르지 않습니다.
  *   사용법: ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
  */
+/* [M4-3] Linux의 accept4(SOCK_CLOEXEC)는 GNU 확장이라 _GNU_SOURCE가 있어야 선언됨.
+ * 헤더를 include하기 전에 정의해야 하므로 맨 위에 둠. macOS에는 accept4가 없음 */
+#ifdef __linux__
+#define _GNU_SOURCE
+#endif
 #include "csapp.h"
 #include "conn_queue.h"
 #include <strings.h> /* strcasecmp (메서드 대소문자 무시 비교) */
@@ -24,6 +32,11 @@ static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 op
 /* M4-2: 스레드 풀과 실행 인자 */
 static void args_parse(int argc, char **argv);  /* 실행 인자 → cfg */
 static void *worker_main(void *arg);            /* 작업자: 큐에서 꺼내 doit → close 반복 */
+
+/* M4-3: 소켓 설정 */
+static int conn_accept(int listenfd);           /* accept + FD_CLOEXEC (OS별 분기) */
+static int fd_cloexec_set(int fd);              /* fd에 FD_CLOEXEC 켜기 */
+static int conn_timeouts_set(int connfd);       /* SO_RCVTIMEO, SO_SNDTIMEO 걸기 */
 
 /* M2: 요청 처리 */
 void doit(int fd);
@@ -48,15 +61,15 @@ static void http_error_send(int fd, const char *cause, const char *errnum,
 
 /* M3: CGI */
 static void cgi_serve(int fd, const char *filename, const char *cgiargs);     /* serve_dynamic 대신 (부모 쪽) */
-static void cgi_child_run(int fd, const char *filename, const char *cgiargs); /* serve_dynamic의 자식 부분 분리 */
+static void cgi_child_run(int fd, const char *filename, char *const envp[]);  /* serve_dynamic의 자식 부분 분리 */
 
 
 /* ============================== M1 소켓 연결 ============================== */
 
 /*
  * [M4-2] 실행 인자로 받는 설정값 (final.md 0장 "실행 방법")
- * root, timeout, keepalive_max는 이번 단계에서는 받아 두기만 하고,
- * M5-1(root), M4-3(timeout), M5-4a(keepalive_max)에서 사용합니다.
+ * timeout은 M4-3에서 소켓 타임아웃에 씁니다. root와 keepalive_max는
+ * 받아 두기만 하고 M5-1(root), M5-4a(keepalive_max)에서 사용합니다.
  */
 struct server_config {
     const char *port;
@@ -76,6 +89,11 @@ static struct conn_queue conn_q;
 /* 작업자 스레드 id. M7(안전한 종료)에서 pthread_join할 때 씀 */
 static pthread_t *workers;
 
+/* [M4-3] CGI 자식이 execve 전에 닫을 fd 번호의 끝 (3번부터 이 값 - 1까지 닫음).
+ * 자식에서 sysconf를 부르지 않도록 main이 시작할 때 한 번 계산해 둠 */
+static int fd_close_max;
+#define FD_CLOSE_LIMIT 4096 /* 한도가 아주 큰 시스템에서 close 루프가 길어지지 않게 */
+
 /*
  * 1) 실행 인자를 읽는다 (args_parse)
  * 2) SIGPIPE를 무시하도록 설정한다
@@ -89,10 +107,6 @@ int main(int argc, char **argv)
     int listenfd;
     int connfd;
     int err;
-    socklen_t clientlen;
-    /* Tiny는 sockaddr_storage(IPv4/IPv6 모두 담는 큰 구조체)를 썼음.
-     * 우리는 IPv4만 쓰고 Getnameinfo 접속 기록도 뺐으므로 sockaddr_in으로 충분 */
-    struct sockaddr_in clientaddr;
 
     args_parse(argc, argv); /* 틀린 인자면 사용법을 출력하고 여기서 exit(1) */
 
@@ -108,6 +122,14 @@ int main(int argc, char **argv)
     listenfd = listen_socket_open(cfg.port);
     if (listenfd < 0) { /* 시작부터 소켓을 못 열면 서버를 띄울 수 없으므로 종료 */
         exit(1);
+    }
+
+    /* [M4-3] CGI 자식이 닫을 fd 범위. 한도를 못 읽으면(-1) 상한값을 씀 */
+    {
+        long open_max = sysconf(_SC_OPEN_MAX);
+        fd_close_max = (open_max < 0 || open_max > FD_CLOSE_LIMIT)
+                           ? FD_CLOSE_LIMIT
+                           : (int)open_max;
     }
 
     /* [M4-2] 큐와 작업자는 시작할 때 한 번만 만듦. 여기서 실패하면 서버를
@@ -131,15 +153,22 @@ int main(int argc, char **argv)
     }
 
     while (1) {
-        clientlen = sizeof(clientaddr);
-        /* Accept(대문자) 대신 accept(소문자): 대문자는 실패하면 exit해서 서버 전체가 꺼짐 */
-        connfd = accept(listenfd, (SA *)&clientaddr, &clientlen);
+        /* Accept(대문자) 대신 accept(소문자): 대문자는 실패하면 exit해서 서버 전체가 꺼짐.
+         * [M4-3] conn_accept가 accept와 FD_CLOEXEC 설정을 함께 함 */
+        connfd = conn_accept(listenfd);
         /* 연결 하나가 accept 직전에 끊기는 등(ECONNABORTED) 실패해도 */
         if (connfd < 0) {
             perror("accept"); /* 원인만 출력하고 */
             continue;         /* 서버는 계속 살아서 다음 연결을 기다림 */
         }
         /* Tiny의 Getnameinfo + "Accepted connection from ..." 출력은 뺌 (응답 동작과 무관) */
+
+        /* [M4-3] 타임아웃을 못 걸면, 그 연결이 작업자를 무한정 붙잡을 수 있으므로 받지 않음 */
+        if (conn_timeouts_set(connfd) < 0) {
+            perror("setsockopt");
+            close(connfd);
+            continue;
+        }
 
         /* [M4-2] 큐에 넣기만 하고 바로 다음 accept로. 처리는 작업자가 함.
          * M4-1처럼 malloc한 칸이 필요 없음: 큐가 값(int)을 복사해 담기 때문 */
@@ -256,6 +285,69 @@ static void args_parse(int argc, char **argv)
     }
 }
 
+/* ============================== M4-3 소켓 설정 ============================== */
+
+/*
+ * [M4-3] accept로 연결을 받고, CGI 자식에게 새지 않도록 FD_CLOEXEC를 켭니다.
+ * FD_CLOEXEC가 켜진 fd는 execve할 때 커널이 자동으로 닫습니다.
+ *
+ * Linux: accept4(SOCK_CLOEXEC)가 받는 순간 함께 켜므로 빈틈이 없음.
+ * macOS: accept4가 없어 accept 뒤에 fcntl로 켬. 그 사이에 다른 작업자가 fork하면
+ *        이 소켓이 자식에게 넘어갈 수 있음 → cgi_child_run이 fd 3 이상을 모두
+ *        닫아서 한 번 더 막음 (final.md 2.6 "두 겹")
+ * 성공하면 connfd, 실패하면 -1 (errno 유지)
+ */
+static int conn_accept(int listenfd)
+{
+    struct sockaddr_in clientaddr; /* 주소는 쓰지 않지만 accept가 채울 곳이 필요 */
+    socklen_t clientlen = sizeof(clientaddr);
+    int connfd;
+
+#ifdef __linux__
+    connfd = accept4(listenfd, (SA *)&clientaddr, &clientlen, SOCK_CLOEXEC);
+#else
+    connfd = accept(listenfd, (SA *)&clientaddr, &clientlen);
+    if (connfd >= 0 && fd_cloexec_set(connfd) < 0) {
+        int saved = errno; /* close가 errno를 바꾸지 않게 보관 */
+        close(connfd);
+        errno = saved;
+        return -1;
+    }
+#endif
+    return connfd;
+}
+
+/* fd에 FD_CLOEXEC를 켭니다. 기존 플래그는 유지. 성공 0, 실패 -1 */
+static int fd_cloexec_set(int fd)
+{
+    int flags = fcntl(fd, F_GETFD);
+
+    if (flags < 0) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+/*
+ * [M4-3] 접속 소켓에 타임아웃을 겁니다 (final.md 2.4).
+ *   읽기 SO_RCVTIMEO = cfg.timeout초: 접속만 하고 요청을 안 보내는 손님,
+ *     아주 느린 요청을 정리. 시간이 지나면 read가 -1(EAGAIN)을 돌려주고
+ *     rio_readlineb도 -1 → doit이 응답 없이 끝나고 작업자가 다음 연결로 감
+ *   쓰기 SO_SNDTIMEO = 2배: 응답을 아주 느리게 받아 가는 손님을 정리
+ * 한계: read 한 번 기준이라 몇 초마다 한 글자씩 보내면 계속 붙잡힘 (Slowloris, 범위 밖)
+ * 성공 0, 실패 -1
+ */
+static int conn_timeouts_set(int connfd)
+{
+    struct timeval rcv = {cfg.timeout, 0};
+    struct timeval snd = {cfg.timeout * 2, 0};
+
+    if (setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv)) < 0) {
+        return -1;
+    }
+    return setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+}
+
 /*
  * socket → setsockopt(SO_REUSEADDR) → bind → listen 순서로 엽니다.
  * 성공하면 리스닝 소켓 fd, 실패하면 -1.
@@ -275,6 +367,15 @@ static int listen_socket_open(const char *port)
     listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0) {
         perror("socket"); /* 실패 원인 출력 */
+        return -1;
+    }
+
+    /* [M4-3] CGI 자식이 리스닝 소켓을 물려받지 않게 함. 물려받으면 서버를 껐다 켤 때
+     * 아직 도는 CGI가 포트를 잡고 있어 bind가 실패함. 다른 스레드가 아직 없으므로
+     * socket과 fcntl 사이에 fork가 끼어들 틈은 없음 */
+    if (fd_cloexec_set(listenfd) < 0) {
+        perror("fcntl");
+        close(listenfd);
         return -1;
     }
 
@@ -745,6 +846,17 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
     char header[MAXLINE];
     int header_len;
     pid_t pid;
+    /* [M4-3] CGI에 넘길 환경 변수를 fork 전에 부모가 만들어 둠 (아래 cgi_child_run 설명).
+     * 스택 배열이라 malloc이 없고, 자식은 fork로 복사된 이 배열을 그대로 execve에 넘김 */
+    char query_env[MAXLINE + sizeof("QUERY_STRING=")];
+    char method_env[] = "REQUEST_METHOD=GET";
+    char *envp[] = {query_env, method_env, NULL};
+    int n;
+
+    n = snprintf(query_env, sizeof(query_env), "QUERY_STRING=%s", cgiargs);
+    if (n < 0 || n >= (int)sizeof(query_env)) { /* 잘렸으면 잘린 쿼리로 실행하지 않음 */
+        return;
+    }
 
     /* Tiny는 sprintf + Rio_writen을 두 번 → snprintf 한 번으로 만들어 한 번에 보냄 */
     header_len = snprintf(header, sizeof(header),
@@ -761,7 +873,7 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
         return;            /* 이 요청만 끝냄 (서버는 계속 동작) */
     }
     if (pid == 0) {                           /* 자식 프로세스이면 */
-        cgi_child_run(fd, filename, cgiargs); /* 자식 일은 함수로 분리 (돌아오지 않음) */
+        cgi_child_run(fd, filename, envp); /* 자식 일은 함수로 분리 (돌아오지 않음) */
     }
     /* 부모: 방금 만든 자식이 끝날 때까지 기다렸다가 회수.
      * Wait(대문자)도 실패하면 exit하므로 waitpid로 바꾸고 실패는 출력만 함 */
@@ -773,13 +885,29 @@ static void cgi_serve(int fd, const char *filename, const char *cgiargs)
 /*
  * 자식 프로세스에서 CGI 프로그램을 실행합니다.
  * Tiny의 serve_dynamic에서 if (Fork() == 0) { ... } 안에 있던 코드를 뺐습니다.
- * 동작 변화 없음. (여기서 대문자 래퍼가 exit해도 자식만 끝나고 서버는 무사함)
+ *
+ * [M4-3] 멀티스레드 서버에서 fork하면 자식에는 fork를 부른 스레드 하나만 복사됩니다.
+ * 그 순간 다른 작업자가 malloc 내부 락을 잡고 있었다면, 자식에서 그 락은 풀어 줄
+ * 스레드가 없어 영원히 잠깁니다. 그래서 자식은 malloc을 쓰지 않는 함수
+ * (async-signal-safe: dup2, close, execve, _exit)만 씁니다.
+ *   - setenv(내부에서 malloc) → 부모가 fork 전에 만든 envp를 execve에 넘김
+ *   - Dup2, Execve(대문자 래퍼) → 실패하면 fprintf + exit를 부름 → 소문자 + _exit
+ * 또 execve 전에 fd 3번 이상을 모두 닫아, 다른 손님 소켓과 리스닝 소켓이
+ * CGI 프로그램에 넘어가지 않게 합니다 (FD_CLOEXEC 설정 전 틈까지 막음).
  */
-static void cgi_child_run(int fd, const char *filename, const char *cgiargs)
+static void cgi_child_run(int fd, const char *filename, char *const envp[])
 {
     char *argv[] = {NULL}; /* Tiny의 emptylist: CGI 프로그램에 넘길 인자 없음 */
 
-    setenv("QUERY_STRING", cgiargs, 1); /* 쿼리 문자열(예: "1&2")을 환경 변수로 넘김 */
-    Dup2(fd, STDOUT_FILENO);            /* 표준 출력(1번)을 클라이언트 소켓으로 돌림 → printf가 곧바로 응답이 됨 */
-    Execve(filename, argv, environ);    /* 이 프로세스를 CGI 프로그램으로 바꿈. 성공하면 돌아오지 않음 */
+    /* 표준 출력(1번)을 클라이언트 소켓으로 돌림 → printf가 곧바로 응답이 됨.
+     * dup2로 만든 1번에는 FD_CLOEXEC가 없으므로 execve 뒤에도 남음 */
+    if (dup2(fd, STDOUT_FILENO) < 0) {
+        _exit(127);
+    }
+    /* 0, 1, 2(표준 입출력)만 남기고 모두 닫음. 원래 소켓 fd도 1번에 복사했으니 닫아도 됨 */
+    for (int i = 3; i < fd_close_max; i++) {
+        close(i);
+    }
+    execve(filename, argv, envp); /* 이 프로세스를 CGI 프로그램으로 바꿈. 성공하면 돌아오지 않음 */
+    _exit(127); /* 여기 왔다면 execve 실패. exit 대신 _exit: 부모에게서 복사된 stdio 버퍼를 비우지 않음 */
 }
