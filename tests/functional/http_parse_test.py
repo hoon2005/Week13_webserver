@@ -1,4 +1,4 @@
-"""M5-1 요청 파서·응답 형식, M5-2 요청 본문 기능 테스트입니다.
+"""M5-1 요청 파서·응답 형식, M5-2 요청 본문, M5-3 CGI 응답 기능 테스트입니다.
 
 사용법: python3 http_parse_test.py <build 폴더>
 
@@ -92,9 +92,9 @@ class HttpParseTest(unittest.TestCase):
         cls.log.close()
         shutil.rmtree(cls.work_dir, ignore_errors=True)
 
-    def send_raw(self, data, close_write=False):
+    def send_raw(self, data, close_write=False, timeout=REQUEST_TIMEOUT_SEC):
         """data를 보내고 서버가 닫을 때까지 읽은 바이트를 Response로 돌려줌."""
-        with socket.create_connection((HOST, self.port), timeout=REQUEST_TIMEOUT_SEC) as s:
+        with socket.create_connection((HOST, self.port), timeout=timeout) as s:
             s.sendall(data)
             if close_write:
                 s.shutdown(socket.SHUT_WR)
@@ -297,10 +297,41 @@ class HttpParseTest(unittest.TestCase):
                 self.assertEqual(resp.status, 200)
                 self.assertIn(text, resp.body)
 
-    def test_adder_no_longer_prints_connection(self):
+    # ---------- CGI 응답 (M5-3) ----------
+
+    def test_cgi_response_framed_by_server(self):  # E-G7, E-G8
         resp = self.get("/cgi-bin/adder?1&2")
-        self.assertNotIn("content-length", resp.headers)  # M5-3에서 서버가 붙임
-        self.assertNotIn("connection", resp.headers)
+        self.assertEqual(resp.status, 200)
+        self.assert_framed(resp)  # 서버가 센 Content-Length가 본문 길이와 같음
+        head = resp.raw.partition(b"\r\n\r\n")[0].lower()
+        self.assertEqual(head.count(b"content-length:"), 1)
+        self.assertEqual(resp.headers.get("content-type"), "text/html")
+
+    def test_cgi_failures_500(self):  # E-G2, E-G4, E-G9
+        for name in ("fail", "nohdr", "big"):
+            with self.subTest(cgi=name):
+                start = time.monotonic()
+                resp = self.get("/cgi-bin/" + name)
+                self.assertEqual(resp.status, 500)
+                self.assert_framed(resp)
+                self.assertLess(time.monotonic() - start, 5)
+
+    def child_commands(self):
+        out = subprocess.run(["ps", "-axo", "ppid=,command="], capture_output=True,
+                             text=True, check=True).stdout
+        return [line.split(None, 1)[1] for line in out.splitlines()
+                if line.split() and line.split()[0] == str(self.proc.pid)]
+
+    def test_cgi_timeout_504(self):  # E-G11, E-P3 (약 10초 걸림)
+        start = time.monotonic()
+        # 서버의 CGI 상한(10초)보다 길게 기다려야 504를 받음
+        resp = self.send_raw(b"GET /cgi-bin/slow HTTP/1.1\r\nHost: x\r\n\r\n", timeout=20)
+        elapsed = time.monotonic() - start
+        self.assertEqual(resp.status, 504)
+        self.assert_framed(resp)
+        self.assertGreater(elapsed, 9)
+        self.assertLess(elapsed, 13)
+        self.assertEqual(self.child_commands(), [])  # slow(sleep)가 남지 않음
 
     def test_expect_100_continue(self):  # E-X1
         with socket.create_connection((HOST, self.port), timeout=REQUEST_TIMEOUT_SEC) as s:

@@ -1,0 +1,4 @@
+#!/bin/sh
+# 헤더 없이 본문만 출력하는 CGI입니다 (테스트용). 헤더와 본문을 나누는 빈 줄이 없습니다.
+# 서버는 출력을 해석할 수 없으므로 500을 보내야 합니다 (M5-3, E-G4).
+printf 'just a body without any header'

@@ -4,7 +4,7 @@
  *   Tiny의 각 부분을 같은 동작의 우리 코드로 바꿔 끼웠습니다.
  *     M1 소켓 연결: listen_socket_open, main의 accept 반복문
  *     M2 정적 GET:  doit과 단계 함수들, static_file_serve, http_error_send
- *     M3 CGI GET:   cgi_serve, cgi_child_run
+ *     M3 CGI GET:   cgi_serve ([M5-3] 실행과 출력 해석은 cgi.c로 옮김)
  *   리뷰에서 나온 안정성 수정 5가지도 반영했습니다. 클라이언트 한 명의 문제
  *   (연결 중단, 깨진 요청, 빈 파일, fork 실패)로 서버 전체가 꺼지지 않고
  *   그 요청만 끝냅니다.
@@ -19,6 +19,8 @@
  *   HEAD(정적 파일만), CSS·JS MIME, --root를 지원합니다.
  *   Phase 2 M5-2: Content-Length만큼 요청 본문을 읽습니다(1 MiB 넘으면 413,
  *   Expect: 100-continue에 답함). CGI POST는 본문을 임시 파일에 담아 stdin으로 넘깁니다.
+ *   Phase 2 M5-3: CGI 출력을 파이프로 모은 뒤 서버가 응답을 만듭니다(cgi.c).
+ *   CGI가 실패하면 500, 10초 안에 안 끝나면 504, Content-Length는 서버가 셉니다.
  *   사용법: ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
  */
@@ -30,6 +32,7 @@
 #include "csapp.h"
 #include "conn_queue.h"
 #include "http.h" /* [M5-1] 요청 파서, MIME, 상태 문구 */
+#include "cgi.h"  /* [M5-3] CGI 실행과 출력 해석 */
 
 /* M1 */
 static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 open_listenfd 대신 */
@@ -64,8 +67,6 @@ static void http_error_send(int fd, int head, int status, const char *cause,
 static int cgi_serve(int fd, const char *filename, const char *cgiargs,
                      const struct http_request *req);  /* serve_dynamic 대신 (부모 쪽) */
 static int cgi_input_open(const struct http_request *req); /* [M5-2] CGI stdin 준비 */
-static void cgi_child_run(int fd, int infd, const char *filename,
-                          char *const envp[]);         /* serve_dynamic의 자식 부분 분리 */
 
 
 /* ============================== M1 소켓 연결 ============================== */
@@ -305,7 +306,7 @@ static void args_parse(int argc, char **argv)
  *
  * Linux: accept4(SOCK_CLOEXEC)가 받는 순간 함께 켜므로 빈틈이 없음.
  * macOS: accept4가 없어 accept 뒤에 fcntl로 켬. 그 사이에 다른 작업자가 fork하면
- *        이 소켓이 자식에게 넘어갈 수 있음 → cgi_child_run이 fd 3 이상을 모두
+ *        이 소켓이 자식에게 넘어갈 수 있음 → CGI 자식(cgi.c)이 fd 3 이상을 모두
  *        닫아서 한 번 더 막음 (final.md 2.6 "두 겹")
  * 성공하면 connfd, 실패하면 -1 (errno 유지)
  */
@@ -572,9 +573,13 @@ void doit(int fd)
             goto done;
         }
         status = cgi_serve(fd, filename, cgiargs, &req); /* serve_dynamic 대신 */
-        if (status != 0) { /* CGI 입력 준비 실패: 아직 아무것도 안 보냈으므로 500 */
+        /* [M5-3] 출력을 모은 뒤 응답하므로, 실패해도 아직 아무것도 안 보냈음 */
+        if (status == 504) {
+            http_error_send(fd, head, 504, filename,
+                            "The CGI program didn't finish in time");
+        } else if (status != 0) {
             http_error_send(fd, head, status, filename,
-                            "Tiny couldn't prepare the CGI input");
+                            "The CGI program failed");
         }
     }
 
@@ -890,25 +895,21 @@ static void http_error_send(int fd, int head, int status, const char *cause,
 
 /*
  * CGI 요청을 처리합니다. Tiny의 serve_dynamic 중 부모가 하던 일입니다.
- * 1) 상태 줄과 Server 헤더를 먼저 보낸다. 나머지 헤더와 본문은 CGI
- *    프로그램이 직접 출력한다
- * 2) fork로 자식을 만들어 자식이 프로그램을 실행한다
- * 3) 부모는 자식이 끝날 때까지 기다렸다가 회수한다. 회수하지 않으면
- *    끝난 자식이 좀비 프로세스로 남는다
- *
- * [안정성 수정] Fork(대문자)는 실패하면(프로세스 수 한도 등) 서버를 exit시켰음.
- * fork의 반환값을 확인해서 실패하면 이 요청만 끝냄.
- * 200 헤더는 이미 나갔으므로 500으로 바꿀 수 없어 연결만 닫음(main이 close).
- * 헤더를 fork 뒤로 옮기면 부모의 헤더와 자식의 출력 순서가 섞일 수 있어
- * 순서는 Tiny와 같게 둠.
+ * [M5-3] 순서를 바꿨습니다 (final.md 4.1~4.4).
+ *   M5-2까지: 200 상태 줄을 먼저 보냄 → fork → CGI가 소켓에 직접 씀
+ *     - CGI가 실패해도 클라이언트는 200 + 빈 본문을 받음
+ *     - 끝나지 않는 CGI를 기다리는 동안 작업자가 묶임
+ *     - 응답이 어디서 끝나는지 서버가 몰라 keep-alive를 할 수 없음
+ *   지금: 입력 준비 → cgi_run(출력을 파이프로 끝까지 모음, 1 MiB·10초 상한)
+ *         → cgi_response_build(헤더/본문 나누기, 서버가 길이를 셈) → 한 번에 보냄
+ * 반환: 0(보냈거나 보내다 끊김), 500(입력 준비·실행 실패, 출력 이상), 504(시간 초과).
+ * 0이 아니면 아직 아무것도 보내지 않았으므로 doit이 오류 응답을 보냅니다.
  */
 static int cgi_serve(int fd, const char *filename, const char *cgiargs,
                      const struct http_request *req)
 {
-    char header[MAXLINE];
-    int header_len;
-    pid_t pid;
-    /* [M4-3] CGI에 넘길 환경 변수를 fork 전에 부모가 만들어 둠 (아래 cgi_child_run 설명).
+    char header[MAXBUF];
+    /* [M4-3] CGI에 넘길 환경 변수를 fork 전에 부모가 만들어 둠 (cgi.c의 child_exec 설명).
      * 스택 배열이라 malloc이 없고, 자식은 fork로 복사된 이 배열을 그대로 execve에 넘김.
      * [M5-2] REQUEST_METHOD는 실제 메서드, POST면 CONTENT_LENGTH, 있으면 CONTENT_TYPE 추가 */
     char query_env[MAXLINE + sizeof("QUERY_STRING=")];
@@ -917,7 +918,12 @@ static int cgi_serve(int fd, const char *filename, const char *cgiargs,
     char type_env[sizeof("CONTENT_TYPE=") + sizeof(req->content_type)];
     char *envp[5];
     int envc = 0;
+    struct cgi_output out = {NULL, 0};
+    const char *body;
+    size_t body_len;
+    int code;
     int infd;
+    int status;
     int n;
 
     n = snprintf(query_env, sizeof(query_env), "QUERY_STRING=%s", cgiargs);
@@ -939,38 +945,34 @@ static int cgi_serve(int fd, const char *filename, const char *cgiargs,
     }
     envp[envc] = NULL;
 
-    /* [M5-2] CGI의 표준 입력 준비. 200을 보내기 전에 해야 실패하면 500을 보낼 수 있음 */
+    /* [M5-2] CGI의 표준 입력 준비 (본문 임시 파일 또는 /dev/null) */
     infd = cgi_input_open(req);
     if (infd < 0) {
         perror("cgi input");
         return 500;
     }
 
-    /* Tiny는 sprintf + Rio_writen을 두 번 → snprintf 한 번으로 만들어 한 번에 보냄 */
-    header_len = snprintf(header, sizeof(header),
-                          "HTTP/1.1 200 OK\r\n" /* [M5-1] 나머지 헤더는 CGI가 출력 */
-                          "Server: Tiny Web Server\r\n");
-    /* [안정성 수정] Rio_writen 대신 rio_writen. 이미 끊겼으면 자식을 만들지 않음 */
-    if (rio_writen(fd, header, header_len) != header_len) {
-        close(infd);
-        return 0;
+    /* [M5-3] 실행하고 출력을 모음. fork·exec·kill·waitpid는 모두 cgi_run 안에서 */
+    status = cgi_run(filename, envp, infd, CGI_TIMEOUT_SEC, CGI_OUT_MAX,
+                     fd_close_max, &out);
+    close(infd); /* 임시 파일은 이름이 없으므로 여기서 닫으면 사라짐 */
+    if (status != 0) { /* 500 또는 504. out은 이미 해제됨 */
+        return status;
     }
 
-    pid = fork(); /* [안정성 수정] Fork 대신 fork */
-    if (pid < 0) {         /* 자식 생성 실패 */
-        perror("fork");    /* 원인만 출력하고 */
-        close(infd);
-        return 0;          /* 200을 이미 보냈으므로 500으로 바꿀 수 없음 (M5-3에서 해결) */
+    /* [M5-3] 출력 해석: Status 반영, CGI의 Content-Length·Connection은 버림.
+     * keep-alive는 M5-4b에서 켬 (지금은 항상 close) */
+    if (cgi_response_build(out.data, out.len, 0, header, sizeof(header), &code,
+                           &body, &body_len) != 0) {
+        cgi_output_free(&out);
+        return 500;
     }
-    if (pid == 0) {                              /* 자식 프로세스이면 */
-        cgi_child_run(fd, infd, filename, envp); /* 자식 일은 함수로 분리 (돌아오지 않음) */
+    /* [안정성 수정] Rio_writen 대신 rio_writen. 헤더를 다 보냈을 때만 본문 */
+    if (rio_writen(fd, header, strlen(header)) == (ssize_t)strlen(header) &&
+        body_len > 0) {
+        rio_writen(fd, (void *)body, body_len); /* 실패해도 이 요청만 끝남 */
     }
-    close(infd); /* [M5-2] 부모는 입력 fd가 필요 없음. 임시 파일은 이름이 없어 자식이 닫으면 사라짐 */
-    /* 부모: 방금 만든 자식이 끝날 때까지 기다렸다가 회수.
-     * Wait(대문자)도 실패하면 exit하므로 waitpid로 바꾸고 실패는 출력만 함 */
-    if (waitpid(pid, NULL, 0) < 0) {
-        perror("waitpid");
-    }
+    cgi_output_free(&out);
     return 0;
 }
 
@@ -1031,41 +1033,4 @@ static int cgi_input_open(const struct http_request *req)
         return -1;
     }
     return fd;
-}
-
-/*
- * 자식 프로세스에서 CGI 프로그램을 실행합니다.
- * Tiny의 serve_dynamic에서 if (Fork() == 0) { ... } 안에 있던 코드를 뺐습니다.
- *
- * [M4-3] 멀티스레드 서버에서 fork하면 자식에는 fork를 부른 스레드 하나만 복사됩니다.
- * 그 순간 다른 작업자가 malloc 내부 락을 잡고 있었다면, 자식에서 그 락은 풀어 줄
- * 스레드가 없어 영원히 잠깁니다. 그래서 자식은 malloc을 쓰지 않는 함수
- * (async-signal-safe: dup2, close, execve, _exit)만 씁니다.
- *   - setenv(내부에서 malloc) → 부모가 fork 전에 만든 envp를 execve에 넘김
- *   - Dup2, Execve(대문자 래퍼) → 실패하면 fprintf + exit를 부름 → 소문자 + _exit
- * [M5-2] 표준 입력은 cgi_input_open이 준비한 fd(본문 임시 파일 또는 /dev/null)입니다.
- * 또 execve 전에 fd 3번 이상을 모두 닫아, 다른 손님 소켓과 리스닝 소켓이
- * CGI 프로그램에 넘어가지 않게 합니다 (FD_CLOEXEC 설정 전 틈까지 막음).
- */
-static void cgi_child_run(int fd, int infd, const char *filename,
-                          char *const envp[])
-{
-    char *argv[] = {NULL}; /* Tiny의 emptylist: CGI 프로그램에 넘길 인자 없음 */
-
-    /* [M5-2] 표준 입력(0번)을 본문 임시 파일(GET이면 /dev/null)로 돌림 */
-    if (dup2(infd, STDIN_FILENO) < 0) {
-        _exit(127);
-    }
-
-    /* 표준 출력(1번)을 클라이언트 소켓으로 돌림 → printf가 곧바로 응답이 됨.
-     * dup2로 만든 1번에는 FD_CLOEXEC가 없으므로 execve 뒤에도 남음 */
-    if (dup2(fd, STDOUT_FILENO) < 0) {
-        _exit(127);
-    }
-    /* 0, 1, 2(표준 입출력)만 남기고 모두 닫음. 원래 소켓 fd도 1번에 복사했으니 닫아도 됨 */
-    for (int i = 3; i < fd_close_max; i++) {
-        close(i);
-    }
-    execve(filename, argv, envp); /* 이 프로세스를 CGI 프로그램으로 바꿈. 성공하면 돌아오지 않음 */
-    _exit(127); /* 여기 왔다면 execve 실패. exit 대신 _exit: 부모에게서 복사된 stdio 버퍼를 비우지 않음 */
 }
