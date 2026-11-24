@@ -1,7 +1,7 @@
 """M7 안정성 기능 테스트입니다.
 
 사용법: python3 stability_test.py <build 폴더>
-서버를 띄우는 도우미는 phase2_test.py의 것을 씁니다.
+서버를 띄우고 끄는 도우미는 checked_server.py입니다 (종료 코드와 로그도 확인).
 """
 
 import sys
@@ -9,7 +9,8 @@ import threading
 import time
 import unittest
 
-from phase2_test import Server, get, read_response
+from checked_server import CheckedServer as Server
+from phase2_test import get, read_response
 
 GET_HOME = b"GET /home.html HTTP/1.1\r\nHost: x\r\n\r\n"
 

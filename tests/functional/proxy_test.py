@@ -3,8 +3,8 @@
 사용법: python3 proxy_test.py <build 폴더>
 
 백엔드는 이 파일 안의 작은 소켓 서버입니다. 응답을 바이트 그대로 정할 수 있어서
-늦은 응답, 잘린 응답, 잘못된 응답도 만들 수 있습니다. 서버를 띄우는 도우미는
-phase2_test.py의 것을 씁니다.
+늦은 응답, 잘린 응답, 잘못된 응답도 만들 수 있습니다. 서버를 띄우고 끄는 도우미는
+checked_server.py입니다 (종료 코드와 로그도 확인).
 """
 
 import functools
@@ -19,7 +19,8 @@ import time
 import unittest
 from unittest import mock
 
-from phase2_test import BUILD_DIR, HOST, Server, exchange, find_free_port, get
+from checked_server import CheckedServer as Server
+from phase2_test import BUILD_DIR, HOST, exchange, find_free_port, get
 from phase2_test import read_response
 
 TIMEOUT_SEC = 1  # 시험용 --proxy-timeout

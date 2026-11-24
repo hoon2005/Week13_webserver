@@ -1,7 +1,7 @@
 """M4·M5 중간 점검에서 찾은 문제의 회귀 테스트입니다.
 
 사용법: python3 issues_test.py <build 폴더>
-서버를 띄우는 도우미는 phase2_test.py의 것을 씁니다.
+서버를 띄우고 끄는 도우미는 checked_server.py입니다 (종료 코드와 로그도 확인).
 """
 
 import os
@@ -12,7 +12,8 @@ import time
 import unittest
 from unittest import mock
 
-from phase2_test import BUILD_DIR, Server, exchange, get, read_response
+from checked_server import CheckedServer as Server
+from phase2_test import BUILD_DIR, exchange, get, read_response
 
 
 class RequestCheckTest(unittest.TestCase):

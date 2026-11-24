@@ -2,9 +2,8 @@
 
 사용법: python3 shutdown_test.py <build 폴더>
 
-서버를 띄우는 도우미는 phase2_test.py의 것을 씁니다. 그 도우미의 stop()은 5초가
-지나면 강제로 끄고 로그를 지우므로, 종료를 확인하는 테스트는 wait_exit()로 직접
-기다리고 시간 초과도 실패로 봅니다.
+서버를 띄우고 끄는 도우미는 checked_server.py입니다. 종료에 걸리는 시간까지 보는
+테스트는 wait_exit()로 직접 기다리고 시간 초과도 실패로 봅니다.
 """
 
 import functools
@@ -19,7 +18,8 @@ import time
 import unittest
 from unittest import mock
 
-from phase2_test import HOST, Server, closed_by_server, exchange, find_free_port, get
+from checked_server import CheckedServer
+from phase2_test import HOST, closed_by_server, exchange, find_free_port, get
 from phase2_test import read_response
 from proxy_test import Backend, reply
 
@@ -53,7 +53,7 @@ class ShutdownCase(unittest.TestCase):
         # 있게 함 (테스트 자신은 다른 그룹이라 안전)
         popen = functools.partial(subprocess.Popen, start_new_session=True)
         with mock.patch("phase2_test.subprocess.Popen", popen):
-            server = Server(*args)
+            server = CheckedServer(*args)
         self.addCleanup(server.stop)
         return server
 
@@ -95,6 +95,7 @@ class ShutdownCase(unittest.TestCase):
 
     def wait_exit(self, server, seconds, code):
         """seconds 안에 끝나고 종료 코드가 code인지. 시간 초과도 실패"""
+        server.expected_code = code
         try:
             got = server.proc.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
@@ -282,7 +283,8 @@ class GracefulTest(ShutdownCase):
             for _ in range(6):
                 server.proc.send_signal(signal.SIGINT)
                 time.sleep(0.0005 * (i % 6))
-            self.assertIn(server.proc.wait(timeout=3), (0, 1))
+            server.expected_code = server.proc.wait(timeout=3)
+            self.assertIn(server.expected_code, (0, 1))
             self.assertNotIn("Sanitizer", self.log(server))
 
     def test_터미널이_닫히면_SIGHUP으로_하던_요청을_마치고_끝난다(self):
@@ -339,7 +341,7 @@ class CgiProcessTest(ShutdownCase):
         sock.sendall(cgi_request("forever"))
         cgi = self.started_pid(server, "forever.pid")
         os.kill(server.proc.pid, signal.SIGKILL)  # 서버 프로세스에만
-        server.proc.wait(timeout=5)
+        self.wait_exit(server, 5, -signal.SIGKILL)
         self.assertTrue(alive(cgi))
 
         with mock.patch("phase2_test.find_free_port", lambda: server.port):
