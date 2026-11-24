@@ -1,4 +1,4 @@
-# make verify: CI와 같은 명령입니다. 빌드, 단위 테스트, 기능 테스트, 코드 모양 검사를
+# make verify: CI와 같은 명령입니다. 빌드, 단위 테스트, TSan 단위 테스트, 기능 테스트, 코드 모양 검사를
 # 차례로 실행합니다. PR을 올리기 전에 로컬에서 먼저 실행합니다.
 #
 # 소스 배치 규칙
@@ -65,7 +65,7 @@ functional: $(PROGRAMS)
 	@if [ -z "$(FUNCTIONAL_TESTS)" ]; then echo "functional: 기능 테스트 파일이 아직 없습니다"; fi
 	@set -e; for t in $(FUNCTIONAL_TESTS); do echo "== $$t"; python3 -B $$t $(BUILD); done
 
-verify: all test functional lint
+verify: all test tsan functional lint
 
 # 코드 모양 검사입니다(CONVENTION.md의 "코드"). 모양은 .clang-format이 정합니다.
 # git이 아는 파일만 봅니다. 새 파일은 git add 뒤에 검사됩니다.
@@ -107,7 +107,7 @@ $(RELEASE_BUILD) $(RELEASE_BUILD)/obj:
 
 # make tsan: 단위 테스트를 ThreadSanitizer로 빌드해 돌립니다. 스레드를 쓰는 코드의
 # 데이터 경합을 찾습니다. TSan은 ASan과 함께 켤 수 없어 build/tsan/에 따로 빌드합니다.
-# 동시성 모델을 정하기 전이라 make verify와 CI에는 아직 넣지 않습니다.
+# M4-2부터 스레드 풀을 쓰므로 make verify(=CI)에 포함합니다.
 TSAN_BUILD    := $(BUILD)/tsan
 TSAN_CFLAGS   := -std=c11 -Wall -Wextra -Werror -g -O1 -fno-omit-frame-pointer \
                  -fsanitize=thread -MMD -MP -pthread

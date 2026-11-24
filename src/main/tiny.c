@@ -8,18 +8,22 @@
  *   리뷰에서 나온 안정성 수정 5가지도 반영했습니다. 클라이언트 한 명의 문제
  *   (연결 중단, 깨진 요청, 빈 파일, fork 실패)로 서버 전체가 꺼지지 않고
  *   그 요청만 끝냅니다.
- *   Phase 2 M4-1: 연결마다 스레드 하나를 만들어 동시에 처리합니다 (conn_thread).
- *   M4-2에서 스레드 풀로 바꾸고, 이 커밋은 부하 측정 비교 기준으로 남깁니다.
- *   사용법: ./build/tiny <port>
+ *   Phase 2 M4-2: 스레드 풀로 동시에 처리합니다. main은 accept한 연결을 작업
+ *   큐(conn_queue.c)에 넣기만 하고, 미리 만든 작업자 N개가 꺼내 처리합니다.
+ *   (M4-1의 연결당 스레드 버전은 부하 측정 비교 기준으로 그 커밋에 남아 있습니다)
+ *   사용법: ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
+ *                       [--timeout 초] [--keepalive-max N]
  */
 #include "csapp.h"
+#include "conn_queue.h"
 #include <strings.h> /* strcasecmp (메서드 대소문자 무시 비교) */
 
 /* M1 */
 static int listen_socket_open(const char *port); /* 새로 만듦: csapp.c의 open_listenfd 대신 */
 
-/* M4-1: 연결당 스레드 */
-static void *conn_thread(void *arg); /* 연결 하나를 맡아 doit → close 후 끝남 */
+/* M4-2: 스레드 풀과 실행 인자 */
+static void args_parse(int argc, char **argv);  /* 실행 인자 → cfg */
+static void *worker_main(void *arg);            /* 작업자: 큐에서 꺼내 doit → close 반복 */
 
 /* M2: 요청 처리 */
 void doit(int fd);
@@ -50,28 +54,47 @@ static void cgi_child_run(int fd, const char *filename, const char *cgiargs); /*
 /* ============================== M1 소켓 연결 ============================== */
 
 /*
- * 1) SIGPIPE를 무시하도록 설정한다
- * 2) 실행 인자로 받은 포트에 리스닝 소켓을 연다 (listen_socket_open)
- * 3) 무한 반복: accept로 연결 하나를 꺼내 connfd를 받고
- *    → [M4-1] 스레드를 하나 만들어 그 연결을 넘기고, 바로 다음 accept로 돌아감
- *       (예전에는 main이 doit을 직접 불러, 한 손님이 끝날 때까지 다음 손님이 기다렸음)
+ * [M4-2] 실행 인자로 받는 설정값 (final.md 0장 "실행 방법")
+ * root, timeout, keepalive_max는 이번 단계에서는 받아 두기만 하고,
+ * M5-1(root), M4-3(timeout), M5-4a(keepalive_max)에서 사용합니다.
+ */
+struct server_config {
+    const char *port;
+    const char *root;  /* NULL이면 지금처럼 현재 폴더 기준 */
+    int threads;       /* 작업자 수 */
+    int queue;         /* 작업 큐 칸 수 */
+    int timeout;       /* 읽기 타임아웃(초). 쓰기는 2배 */
+    int keepalive_max; /* 연결 하나에서 처리할 최대 요청 수 */
+};
+
+/* 기본값: final.md 2.3절 (작업자 16, 큐 64), 2.4절 (5초), 5장 (100) */
+static struct server_config cfg = {NULL, NULL, 16, 64, 5, 100};
+
+/* main과 작업자가 함께 쓰는 작업 큐. 큐 안의 값은 conn_queue.c가 락으로 지킴 */
+static struct conn_queue conn_q;
+
+/* 작업자 스레드 id. M7(안전한 종료)에서 pthread_join할 때 씀 */
+static pthread_t *workers;
+
+/*
+ * 1) 실행 인자를 읽는다 (args_parse)
+ * 2) SIGPIPE를 무시하도록 설정한다
+ * 3) 실행 인자로 받은 포트에 리스닝 소켓을 연다 (listen_socket_open)
+ * 4) [M4-2] 작업 큐를 만들고 작업자 스레드 N개를 미리 띄운다
+ * 5) 무한 반복: accept로 연결 하나를 꺼내 connfd를 받고 → 큐에 넣고 → 다음 accept
+ *    (큐가 가득 차면 503을 보내지 않고 자리가 날 때까지 기다림. final.md 2.2)
  */
 int main(int argc, char **argv)
 {
     int listenfd;
     int connfd;
-    int *connfdp; /* 스레드에 넘길 connfd를 담는 칸 (연결마다 따로 malloc) */
-    pthread_t tid;
     int err;
     socklen_t clientlen;
     /* Tiny는 sockaddr_storage(IPv4/IPv6 모두 담는 큰 구조체)를 썼음.
      * 우리는 IPv4만 쓰고 Getnameinfo 접속 기록도 뺐으므로 sockaddr_in으로 충분 */
     struct sockaddr_in clientaddr;
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <port>\n", argv[0]);
-        exit(1);
-    }
+    args_parse(argc, argv); /* 틀린 인자면 사용법을 출력하고 여기서 exit(1) */
 
     /* [안정성 수정] 이미 끊긴 클라이언트에게 쓰면 커널이 SIGPIPE를 보내고,
      * 기본 동작은 서버 종료임. 무시하도록 바꾸면 쓰기가 -1(EPIPE)로 실패할 뿐이라
@@ -82,9 +105,29 @@ int main(int argc, char **argv)
     }
 
     /* Open_listenfd(csapp.c) 대신 우리가 만든 listen_socket_open 사용 */
-    listenfd = listen_socket_open(argv[1]);
+    listenfd = listen_socket_open(cfg.port);
     if (listenfd < 0) { /* 시작부터 소켓을 못 열면 서버를 띄울 수 없으므로 종료 */
         exit(1);
+    }
+
+    /* [M4-2] 큐와 작업자는 시작할 때 한 번만 만듦. 여기서 실패하면 서버를
+     * 띄울 수 없으므로 종료 (연결마다 만들던 M4-1과 달리 실행 중에는 만들지 않음) */
+    if (conn_queue_init(&conn_q, cfg.queue) < 0) {
+        fprintf(stderr, "작업 큐를 만들지 못했습니다\n");
+        exit(1);
+    }
+    workers = malloc(sizeof(*workers) * (size_t)cfg.threads);
+    if (workers == NULL) {
+        perror("malloc");
+        exit(1);
+    }
+    for (int i = 0; i < cfg.threads; i++) {
+        /* pthread_create는 errno가 아니라 오류 번호를 반환값으로 돌려줌 → strerror(err) */
+        err = pthread_create(&workers[i], NULL, worker_main, NULL);
+        if (err != 0) {
+            fprintf(stderr, "pthread_create: %s\n", strerror(err));
+            exit(1);
+        }
     }
 
     while (1) {
@@ -98,46 +141,119 @@ int main(int argc, char **argv)
         }
         /* Tiny의 Getnameinfo + "Accepted connection from ..." 출력은 뺌 (응답 동작과 무관) */
 
-        /* [M4-1] &connfd를 그대로 넘기면, 새 스레드가 값을 읽기 전에 main이
-         * 다음 accept로 connfd를 덮어쓸 수 있음 → 두 스레드가 같은 연결을 맡고
-         * 한 연결은 아무도 처리하지 않게 됨. 그래서 연결마다 칸을 따로 만듦 */
-        connfdp = malloc(sizeof(*connfdp));
-        if (connfdp == NULL) {   /* 메모리가 없으면 */
-            perror("malloc");    /* 원인만 출력하고 */
-            close(connfd);       /* 이 연결만 포기 (서버는 계속 동작) */
-            continue;
+        /* [M4-2] 큐에 넣기만 하고 바로 다음 accept로. 처리는 작업자가 함.
+         * M4-1처럼 malloc한 칸이 필요 없음: 큐가 값(int)을 복사해 담기 때문 */
+        if (conn_queue_push(&conn_q, connfd) < 0) {
+            close(connfd); /* 큐가 종료 중이면(M7) 받지 않고 닫음 */
         }
-        *connfdp = connfd;
-
-        /* pthread_create는 errno가 아니라 오류 번호를 반환값으로 돌려줌 → strerror(err) */
-        err = pthread_create(&tid, NULL, conn_thread, connfdp);
-        if (err != 0) {          /* 스레드를 못 만들면 (스레드 수 한도 등) */
-            fprintf(stderr, "pthread_create: %s\n", strerror(err));
-            free(connfdp);       /* 스레드가 받지 못한 칸은 main이 해제하고 */
-            close(connfd);       /* 이 연결만 포기 (서버는 계속 동작) */
-            continue;
-        }
-        /* 성공하면 connfdp와 connfd는 이제 새 스레드 것: main은 해제·close하지 않음 */
     }
 }
 
 /*
- * [M4-1] 연결 하나를 처음부터 끝까지 맡는 스레드입니다.
- * main이 malloc한 칸에서 connfd를 꺼낸 뒤 칸을 해제하고,
- * 예전 main 루프가 하던 일(doit → close)을 그대로 합니다.
+ * [M4-2] 작업자 스레드입니다. 시작할 때 cfg.threads개를 만들어 두고,
+ * 각자 큐에서 연결을 하나씩 꺼내 처음부터 끝까지 처리합니다.
+ * 큐가 비면 conn_queue_pop 안에서 기다립니다 (CPU를 쓰지 않음).
+ * 큐가 종료되면(M7) pop이 -1을 돌려주고 작업자가 끝납니다.
  */
-static void *conn_thread(void *arg)
+static void *worker_main(void *arg)
 {
-    int connfd = *(int *)arg; /* main이 넘긴 칸에서 connfd를 꺼내고 */
-    free(arg);                /* 칸은 바로 해제 (이 스레드만 가진 포인터) */
+    int connfd;
 
-    /* detach: 끝나면 자원을 스스로 반납. join해 줄 스레드가 없으므로 필요.
-     * 하지 않으면 끝난 스레드의 자원(스택 등)이 계속 남음 */
-    pthread_detach(pthread_self());
-
-    doit(connfd);  /* 요청 하나 처리 (Phase 1 코드 그대로) */
-    close(connfd); /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
+    (void)arg; /* 넘겨받는 값 없음 */
+    while ((connfd = conn_queue_pop(&conn_q)) != -1) {
+        /* 락은 pop 안에서만 잡고 풀림: 요청 처리는 락 밖이라 작업자끼리 동시에 진행 */
+        doit(connfd);  /* 요청 하나 처리 (Phase 1 코드 그대로) */
+        close(connfd); /* Close(대문자) 대신 close(소문자): 닫기 실패로 서버가 꺼지지 않게 함 */
+    }
     return NULL;
+}
+
+/* ============================== M4-2 실행 인자 ============================== */
+
+static void usage_exit(const char *prog)
+{
+    fprintf(stderr,
+            "usage: %s <port> [--root DIR] [--threads N] [--queue N]\n"
+            "              [--timeout 초] [--keepalive-max N]\n"
+            "  기본값: --threads %d --queue %d --timeout %d --keepalive-max %d\n",
+            prog, cfg.threads, cfg.queue, cfg.timeout, cfg.keepalive_max);
+    exit(1);
+}
+
+/*
+ * 문자열 s를 정수로 읽어 [min, max] 안이면 *out에 넣고 0, 아니면 -1.
+ * atoi는 "abc"를 0으로, "12x"를 12로 읽고 오류를 알려 주지 않아서 strtol을 씀.
+ */
+static int int_arg_parse(const char *s, int min, int max, int *out)
+{
+    char *end;
+    long v;
+
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0') { /* 범위 초과, 숫자 없음, 뒤에 글자 */
+        return -1;
+    }
+    if (v < min || v > max) {
+        return -1;
+    }
+    *out = (int)v;
+    return 0;
+}
+
+/*
+ * <port>는 지금처럼 첫 번째 인자 (기존 기능 테스트가 ./tiny <port>로 띄움).
+ * 나머지는 "--이름 값" 쌍이고 순서는 상관없음. 틀리면 사용법 출력 후 exit(1).
+ */
+static void args_parse(int argc, char **argv)
+{
+    /* 옵션 이름 → 값을 넣을 곳, 허용 범위 */
+    struct {
+        const char *name;
+        int *dst;
+        int min, max;
+    } int_opts[] = {
+        {"--threads", &cfg.threads, 1, 1024},
+        {"--queue", &cfg.queue, 1, 65536},
+        {"--timeout", &cfg.timeout, 1, 3600},
+        {"--keepalive-max", &cfg.keepalive_max, 1, 1000000},
+    };
+    size_t n_int_opts = sizeof(int_opts) / sizeof(int_opts[0]);
+
+    if (argc < 2 || argv[1][0] == '-') { /* 포트가 없거나 옵션이 먼저 오면 */
+        usage_exit(argv[0]);
+    }
+    cfg.port = argv[1];
+
+    for (int i = 2; i < argc; i += 2) {
+        const char *name = argv[i];
+        const char *value = (i + 1 < argc) ? argv[i + 1] : NULL;
+        size_t k;
+
+        if (value == NULL) { /* "--threads" 뒤에 값이 없음 */
+            fprintf(stderr, "%s: 값이 없습니다\n", name);
+            usage_exit(argv[0]);
+        }
+        if (strcmp(name, "--root") == 0) {
+            cfg.root = value;
+            continue;
+        }
+        for (k = 0; k < n_int_opts; k++) {
+            if (strcmp(name, int_opts[k].name) == 0) {
+                break;
+            }
+        }
+        if (k == n_int_opts) { /* 모르는 옵션 */
+            fprintf(stderr, "%s: 모르는 옵션입니다\n", name);
+            usage_exit(argv[0]);
+        }
+        if (int_arg_parse(value, int_opts[k].min, int_opts[k].max,
+                          int_opts[k].dst) < 0) {
+            fprintf(stderr, "%s %s: %d 이상 %d 이하의 정수여야 합니다\n", name,
+                    value, int_opts[k].min, int_opts[k].max);
+            usage_exit(argv[0]);
+        }
+    }
 }
 
 /*
