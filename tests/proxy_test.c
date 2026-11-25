@@ -375,8 +375,8 @@ static void test_response_204_has_no_length_even_for_head(void)
     TEST_CHECK(res.body == PROXY_BODY_NONE);
     TEST_CHECK(!res.has_length);
     /* HEAD + 200은 지금처럼 백엔드 길이를 알려 줌 */
-    TEST_CHECK(parse_response("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n",
-                              1, &res, out, sizeof(out)) == 0);
+    TEST_CHECK(parse_response("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n", 1,
+                              &res, out, sizeof(out)) == 0);
     TEST_CHECK(res.has_length && res.length == 5);
 }
 

@@ -50,14 +50,14 @@ int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
 struct server_config {
     const char *port;
     int port_num;
-    const char *root;    /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
-    int threads;         /* 작업자 수 */
-    int queue;           /* 작업 큐 크기 */
-    int timeout;         /* 읽기 타임아웃(초). 쓰기는 2배 */
-    int keepalive_max;   /* 연결당 요청 수 상한 */
-    int proxy_timeout;   /* 백엔드 응답 헤더까지 합계, 본문 데이터 간격(초) */
-    long open_max;       /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
-    char *path_env;      /* CGI에 넘길 PATH=... (시작할 때 길이만큼 할당, F6) */
+    const char *root;  /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
+    int threads;       /* 작업자 수 */
+    int queue;         /* 작업 큐 크기 */
+    int timeout;       /* 읽기 타임아웃(초). 쓰기는 2배 */
+    int keepalive_max; /* 연결당 요청 수 상한 */
+    int proxy_timeout; /* 백엔드 응답 헤더까지 합계, 본문 데이터 간격(초) */
+    long open_max;     /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
+    char *path_env;    /* CGI에 넘길 PATH=... (시작할 때 길이만큼 할당, F6) */
 };
 
 static struct server_config cfg = {
@@ -114,7 +114,8 @@ static void config_parse(int argc, char **argv)
     if (argc < 2 || strncmp(argv[1], "--", 2) == 0) {
         usage(argv[0]);
     }
-    cfg.port = argv[1]; /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
+    cfg.port =
+        argv[1]; /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
     cfg.port_num = positive_int_arg(argv[0], argv[1]);
     if (cfg.port_num > 65535) {
         usage(argv[0]);
@@ -280,8 +281,7 @@ int main(int argc, char **argv)
 static void accept_loop(int listenfd, struct conn_queue *queue)
 {
     while (1) {
-        struct pollfd p[2] = {{wake_pipe[0], POLLIN, 0},
-                              {listenfd, POLLIN, 0}};
+        struct pollfd p[2] = {{wake_pipe[0], POLLIN, 0}, {listenfd, POLLIN, 0}};
         int connfd;
 
         if (poll(p, 2, -1) < 0) {
@@ -302,7 +302,8 @@ static void accept_loop(int listenfd, struct conn_queue *queue)
             if (errno == EMFILE || errno == ENFILE) {
                 perror("accept");
                 struct timespec ts = {0, 10 * 1000 * 1000};
-                nanosleep(&ts, NULL); /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
+                nanosleep(&ts,
+                          NULL); /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
             } else if (errno != EAGAIN && errno != EWOULDBLOCK &&
                        errno != EINTR && errno != ECONNABORTED) {
                 perror("accept");
@@ -685,8 +686,8 @@ static void html_escape(const char *in, char *out, size_t cap)
  * extra: 추가 헤더 (405의 Allow 등, 없으면 NULL). 보낸 상태 코드를 돌려줌.
  * cause는 요청에서 온 글자라 HTML 특수문자를 바꿔서 넣음 (F3).
  */
-static int error_reply_extra(int fd, const struct http_request *req,
-                             int status, const char *extra, const char *cause,
+static int error_reply_extra(int fd, const struct http_request *req, int status,
+                             const char *extra, const char *cause,
                              const char *longmsg, int *keep)
 {
     char body[MAXBUF];
@@ -734,10 +735,12 @@ static void request_log(const struct http_request *req, int status,
 
 /* request_handle의 결과: 연결을 어떻게 할지 */
 enum conn_next {
-    CONN_CLOSE_SILENT = 0,  /* 바로 닫음 (끊김, 마감, 본문 도중 실패, 응답 전송 실패) */
-    CONN_KEEP = 1,          /* 다음 요청을 기다림 */
-    CONN_CLOSE_REPLIED = 2, /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
-    CONN_CLOSE_RESET = 3    /* RST로 닫음: 길이 없는 프록시 응답이 잘림 (M6-13) */
+    CONN_CLOSE_SILENT =
+        0,         /* 바로 닫음 (끊김, 마감, 본문 도중 실패, 응답 전송 실패) */
+    CONN_KEEP = 1, /* 다음 요청을 기다림 */
+    CONN_CLOSE_REPLIED =
+        2,               /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
+    CONN_CLOSE_RESET = 3 /* RST로 닫음: 길이 없는 프록시 응답이 잘림 (M6-13) */
 };
 
 static int request_handle(int fd, struct conn_reader *r, int can_keep,
@@ -779,8 +782,8 @@ static int serve_connection(int connfd)
     }
     reader_init(&r, connfd);
     for (int n = 1;; n++) {
-        next = request_handle(connfd, &r, n < cfg.keepalive_max, n > 1,
-                              client_ip);
+        next =
+            request_handle(connfd, &r, n < cfg.keepalive_max, n > 1, client_ip);
         if (next != CONN_KEEP) {
             break;
         }
@@ -1059,7 +1062,8 @@ static int request_route(int fd, struct http_request *req, int *keep)
     }
 
     if (is_static) {
-        if (strcmp(req->method, "POST") == 0) { /* 서버는 알지만 이 대상에는 안 됨 */
+        if (strcmp(req->method, "POST") ==
+            0) { /* 서버는 알지만 이 대상에는 안 됨 */
             return error_reply_extra(fd, req, 405, "Allow: GET, HEAD\r\n",
                                      req->method,
                                      "Static files allow GET and HEAD", keep);
@@ -1220,8 +1224,7 @@ static void child_close_fds(void)
  *   EOF 뒤에도 CGI가 계속 돌 수 있어 waitpid(WNOHANG)를 마감까지 반복 (4.3).
  *   성공하면 *out에 malloc한 출력 (호출한 쪽이 free).
  */
-static int cgi_output_collect(pid_t pid, int outfd, char **out,
-                              size_t *out_len)
+static int cgi_output_collect(pid_t pid, int outfd, char **out, size_t *out_len)
 {
     long deadline = now_ms() + CGI_TIMEOUT_SEC * 1000L;
     size_t cap = 4096, len = 0;
@@ -1345,13 +1348,14 @@ done:
 
 /* CGI가 써도 클라이언트에 보내지 않는 헤더: 서버가 쓰거나 한 구간 전용 */
 static const char *const CGI_DROP[] = {
-    "Content-Length", "Connection", "Keep-Alive", "Proxy-Connection",
-    "TE",             "Trailer",    "Upgrade",    NULL};
+    "Content-Length", "Connection", "Keep-Alive", "Proxy-Connection", "TE",
+    "Trailer",        "Upgrade",    NULL};
 
 static int cgi_header_dropped(const char *name, size_t len)
 {
     for (int i = 0; CGI_DROP[i] != NULL; i++) {
-        if (strlen(CGI_DROP[i]) == len && strncasecmp(name, CGI_DROP[i], len) == 0) {
+        if (strlen(CGI_DROP[i]) == len &&
+            strncasecmp(name, CGI_DROP[i], len) == 0) {
             return 1;
         }
     }
@@ -1381,8 +1385,8 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
         }
     }
     if (len == 0 || !found) {
-        return error_reply(fd, req, 500, req->uri,
-                           "CGI output has no header", keep);
+        return error_reply(fd, req, 500, req->uri, "CGI output has no header",
+                           keep);
     }
 
     extra[0] = '\0';
@@ -1496,8 +1500,7 @@ static int cgi_serve(int fd, const struct http_request *req,
     struct sigaction default_action;
 
     /* 1. envp: 부모가 fork 전에 만들어 둠 (2.5) */
-    snprintf(env_method, sizeof(env_method), "REQUEST_METHOD=%s",
-             req->method);
+    snprintf(env_method, sizeof(env_method), "REQUEST_METHOD=%s", req->method);
     snprintf(env_query, sizeof(env_query), "QUERY_STRING=%s", cgiargs);
     snprintf(env_protocol, sizeof(env_protocol), "SERVER_PROTOCOL=%s",
              req->version);
@@ -1573,8 +1576,7 @@ static int cgi_serve(int fd, const struct http_request *req,
                            "CGI program did not finish in time", keep);
     }
     if (result == CGI_FAILED) {
-        return error_reply(fd, req, 500, filename, "CGI program failed",
-                           keep);
+        return error_reply(fd, req, 500, filename, "CGI program failed", keep);
     }
     status = cgi_reply(fd, req, out, out_len, keep);
     free(out);
