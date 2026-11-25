@@ -38,7 +38,7 @@ TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/test/%)
 
 FUNCTIONAL_TESTS := $(wildcard tests/functional/*_test.py)
 
-.PHONY: all test functional verify lint format release tsan clean help
+.PHONY: all test functional verify lint format release load tsan clean help
 
 all: $(PROGRAMS) $(TEST_BINS)
 
@@ -93,6 +93,11 @@ RELEASE_PROGRAMS := $(MAIN_SRCS:src/main/%.c=$(RELEASE_BUILD)/%)
 
 release: $(RELEASE_PROGRAMS)
 	@if [ -z "$(RELEASE_PROGRAMS)" ]; then echo "release: src/main/에 실행 파일 소스가 아직 없습니다"; fi
+
+# make load: 시나리오 표의 부하 측정(load-*)을 전부 돌립니다. wrk, ab가 필요하고 30분쯤
+# 걸립니다. 하나만 돌리거나 짧게 확인하려면 python3 tests/stress/load.py --help를 봅니다.
+load: release
+	python3 -B tests/stress/load.py
 
 $(RELEASE_PROGRAMS): $(RELEASE_BUILD)/%: src/main/%.c $(RELEASE_LIB_OBJS) | $(RELEASE_BUILD)
 	$(CC) $(CPPFLAGS) $(RELEASE_CFLAGS) $< $(RELEASE_LIB_OBJS) -pthread -o $@
@@ -149,5 +154,6 @@ help:
 	@echo "make format     코드 모양 자동 수정"
 	@echo "make verify     CI와 같은 전체 검증: all + test + functional + lint"
 	@echo "make release    부하 테스트용 -O2 빌드: build/release/<이름>"
+	@echo "make load       부하 측정 전부 (wrk, ab 필요, 30분쯤): build/load/<시각>/"
 	@echo "make tsan       단위 테스트를 ThreadSanitizer로 실행"
 	@echo "make clean      build/ 삭제"
