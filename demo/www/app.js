@@ -18,9 +18,9 @@ var PORT_A = PORT + 1, PORT_B = PORT + 2;
 function $(id) { return document.getElementById(id); }
 function setText(id, t) { $(id).textContent = t; }
 setText("ports", ":" + PORT + " :" + PORT_A + " :" + PORT_B);
-setText("v-port-p", ":" + PORT + " · 프록시"); setText("pane-p", ":" + PORT);
-setText("v-port-a", ":" + PORT_A); setText("pane-a", ":" + PORT_A);
-setText("v-port-b", ":" + PORT_B); setText("pane-b", ":" + PORT_B);
+setText("v-port-p", ":" + PORT + " · 프록시");
+setText("v-port-a", ":" + PORT_A);
+setText("v-port-b", ":" + PORT_B);
 
 // 이 페이지를 우리 서버가 아닌 곳(예: VS Code Live Server :5500)에서 열면
 // /cgi-bin, /api 요청이 그 서버로 가서 404가 납니다. 응답의 Server 헤더로 확인해 알려 줍니다.
@@ -207,24 +207,19 @@ function pulse(id) {
     g.classList.add("pulse");
 }
 
-// ---- 03 Round-Robin: 로그 창과 숫자 -----------------------------------------
+// ---- 03 Round-Robin: 숫자와 응답 순서 -----------------------------------------
 
-var logP = $("log-p"), logA = $("log-a"), logB = $("log-b");
 var trail = $("trail");
 var rrButtons = document.querySelectorAll("#rr-seg button, #rr-reset");
-var cnt, rrNo;
+var cnt;
 
-function println(el, html, cls) {
-    el.insertAdjacentHTML("beforeend", '<span class="line ' + (cls || "") + '">' + html + "</span>");
-    el.scrollTop = el.scrollHeight;
-}
 function updateKpi() {
     var done = cnt.a + cnt.b;
     var pa = done ? Math.round(cnt.a * 100 / done) : 0;
     var pb = done ? 100 - pa : 0;
-    setText("cnt-all", cnt.all); setText("cnt-all2", cnt.all);
-    setText("cnt-a", cnt.a); setText("cnt-a2", cnt.a);
-    setText("cnt-b", cnt.b); setText("cnt-b2", cnt.b);
+    setText("cnt-all", cnt.all);
+    setText("cnt-a", cnt.a);
+    setText("cnt-b", cnt.b);
     setText("pct-a", pa + "%"); setText("pct-b", pb + "%");
     $("bar-a").style.width = (done ? cnt.a * 100 / done : 0) + "%";
     $("bar-b").style.width = (done ? cnt.b * 100 / done : 0) + "%";
@@ -232,21 +227,13 @@ function updateKpi() {
 
 function resetRR() {
     cnt = { a: 0, b: 0, all: 0 };
-    rrNo = 0;
     updateKpi();
     trail.innerHTML = "";
-    setText("v-next", "다음 → A");
-    logP.innerHTML = ""; logA.innerHTML = ""; logB.innerHTML = "";
-    println(logP, '<span class="cmd">$ ./build/tiny ' + PORT + " --root demo/www --route /api=127.0.0.1:" + PORT_A + ",127.0.0.1:" + PORT_B + "</span>");
-    println(logA, '<span class="cmd">$ ./build/tiny ' + PORT_A + " --root demo/lb/www_a</span>");
-    println(logB, '<span class="cmd">$ ./build/tiny ' + PORT_B + " --root demo/lb/www_b</span>");
 }
 resetRR();
 
 function rrOnce(fast) {
     var path = "/api/whoami.txt";
-    rrNo++;
-    var no = "#" + pad(rrNo);
     var tIn = fast ? 45 : 260, tOut = fast ? 55 : 340;
 
     var req = send("GET", path);
@@ -257,8 +244,6 @@ function rrOnce(fast) {
         var m = r.status === 200 && r.body.match(/서버\s*([AB])/);
         cnt.all++;
         if (!m) {
-            println(logP, '<span class="ts">[' + clock() + "]</span> " + no + " GET " + path +
-                ' <span class="bad">' + (r.status || "연결 실패") + "</span>");
             updateKpi();
             addHistory("GET", path, r, "프록시 (응답 없음)");
             var x = document.createElement("span");
@@ -267,16 +252,10 @@ function rrOnce(fast) {
             return;
         }
         var k = m[1].toLowerCase();
-        var port = k === "a" ? PORT_A : PORT_B;
-        println(logP, '<span class="ts">[' + clock() + "]</span> " + no + " GET " + path + ' HTTP/1.1 <span class="ok">200</span> ' +
-            '<span class="to-' + k + '">-&gt; 127.0.0.1:' + port + "</span>", "mark-" + k);
         return travel("path-" + k, "dot-" + k, tOut).then(function () {
             pulse("v-" + k);
             cnt[k]++;
             updateKpi();
-            setText("v-next", "다음 → " + (k === "a" ? "B" : "A"));
-            println(k === "a" ? logA : logB, '<span class="ts">[' + clock() + "]</span> " + no + " GET " + path +
-                ' HTTP/1.1 <span class="ok">200</span>', "mark-" + k);
             var chip = document.createElement("span");
             chip.className = k; chip.textContent = m[1];
             trail.appendChild(chip);
@@ -290,8 +269,6 @@ function run(n, btn) {
     var fast = n >= 100;
     rrButtons.forEach(function (b) { b.disabled = true; });
     btn.classList.add("on");
-    $("state-p").textContent = "처리 중";
-    $("state-p").className = "state busy";
     var p = Promise.resolve();
     for (var i = 0; i < n; i++) {
         p = p.then(function () { return rrOnce(fast); }).then(function () { return sleep(fast ? 0 : 120); });
@@ -299,8 +276,6 @@ function run(n, btn) {
     return p.then(function () {
         rrButtons.forEach(function (b) { b.disabled = false; });
         btn.classList.remove("on");
-        $("state-p").textContent = "대기 중";
-        $("state-p").className = "state";
     });
 }
 

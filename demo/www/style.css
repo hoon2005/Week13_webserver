@@ -24,13 +24,9 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .brand { display: flex; flex-direction: column; padding: 0 4px; }
 .brand b { font-size: 18px; letter-spacing: -0.03em; }
 .brand span { font-size: 12px; color: var(--muted); }
-.pillnav { display: flex; gap: 4px; background: var(--paper); border-radius: 16px; padding: 6px; margin-left: 12px; }
-.pillnav a { padding: 7px 16px; border-radius: 11px; color: var(--muted); text-decoration: none; font-weight: 600; }
-.pillnav a:hover { background: var(--soft); color: var(--ink); }
 .server-pill { margin-left: auto; display: flex; align-items: center; gap: 8px; background: var(--sky);
                color: #164e72; font-weight: 700; padding: 10px 16px; border-radius: 14px; font-size: 13px; }
 .server-pill code { font-weight: 500; opacity: 0.8; }
-.live { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 4px rgba(31, 174, 122, 0.2); }
 
 /* 본문 그리드 */
 .body { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
@@ -43,9 +39,8 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .ico { width: 36px; height: 36px; border-radius: 50%; background: var(--ink); display: grid; place-items: center; flex: none; }
 .ico svg { width: 18px; height: 18px; fill: none; stroke: #fff; stroke-width: 1.6; }
 .desc { color: #5d6676; margin-bottom: 14px; }
-.note, .foot { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
-.foot { grid-column: 1 / -1; margin: 0 6px; }
-.note code, .desc code, .foot code { background: var(--soft); padding: 1px 6px; border-radius: 6px; color: var(--ink); }
+.note { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+.note code, .desc code { background: var(--soft); padding: 1px 6px; border-radius: 6px; color: var(--ink); }
 
 /* 세그먼트 버튼 (Daily / Weekly 모양) */
 .seg { display: inline-flex; background: var(--soft); border-radius: 999px; padding: 4px; gap: 2px; }
@@ -147,7 +142,6 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .lbl { font-size: 15px; font-weight: 700; fill: var(--ink); text-anchor: middle; }
 .lbl-sub { font-size: 12px; fill: var(--muted); text-anchor: middle; font-family: ui-monospace, monospace; }
 .lbl.left, .lbl-sub.left { text-anchor: start; }
-.next { font-size: 12px; font-weight: 700; fill: var(--sky-ink); text-anchor: middle; }
 .vnode.pulse circle { animation: ring 0.5s ease-out; }
 @keyframes ring { 0% { stroke-width: 16; stroke-opacity: 0.5; } 100% { stroke-width: 5; stroke-opacity: 1; } }
 .dot-in { fill: var(--sky-ink); }
@@ -176,39 +170,14 @@ svg { stroke-linecap: round; stroke-linejoin: round; }
 .trail .b { background: var(--b); }
 .trail .x { background: var(--err); }
 
-/* 로그 패널 */
-.logs { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; height: 400px; }
-.log-col { display: grid; grid-template-rows: 1fr 1fr; gap: 14px; min-height: 0; }
-.log { display: flex; flex-direction: column; padding: 16px 18px; min-height: 0; }
-.log-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 14px; }
-.log-head code { color: var(--muted); }
-.state { font-size: 12px; color: var(--muted); }
-.state.busy { color: var(--ok); font-weight: 700; }
-.log-count { margin-left: auto; font-size: 12.5px; color: var(--muted); }
-.log-count b { font-size: 20px; color: var(--ink); letter-spacing: -0.03em; }
-.log-count.a b { color: var(--a); }
-.log-count.b b { color: var(--b); }
-.log-body { flex: 1; margin: 0; overflow-y: auto; font: 12.5px/1.75 ui-monospace, "SF Mono", Menlo, monospace;
-            white-space: pre-wrap; overflow-wrap: anywhere; color: #3b4352; }
-.log-body .ts { color: var(--violet); }
-.log-body .cmd { color: var(--muted); }
-.log-body .ok { color: var(--ok); font-weight: 700; }
-.log-body .bad { color: var(--err); font-weight: 700; }
-.log-body .to-a { color: var(--a); font-weight: 800; }
-.log-body .to-b { color: var(--b); font-weight: 800; }
-.log-body .line { display: block; border-radius: 4px; animation: hl 0.8s ease-out; }
-@keyframes hl { from { background: #fff4d6; } to { background: transparent; } }
-
 @media (max-width: 1150px) {
   .body { grid-template-columns: 1fr; }
   .side { position: static; max-height: 360px; order: 2; }
   .rr { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
-  .main, .logs { grid-template-columns: 1fr; }
-  .logs { height: auto; }
-  .log-body { height: 180px; flex: none; }
-  .pillnav, .brand span { display: none; }
+  .main { grid-template-columns: 1fr; }
+  .brand span { display: none; }
 }
 
 /* 다른 서버(예: Live Server)에서 열었을 때 경고 */

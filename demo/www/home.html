@@ -12,12 +12,7 @@
 <!-- 상단 바 -->
 <header class="topbar">
 <div class="brand"><b>Web Server Playground</b><span>HTTP/1.1 · C · POSIX Sockets · Thread Pool</span></div>
-<nav class="pillnav">
-<a href="#static">정적 파일</a>
-<a href="#cgi">CGI</a>
-<a href="#proxy">프록시</a>
-</nav>
-<div class="server-pill"><span class="live"></span>서버 3개 실행 중 <code id="ports">:8000 :8001 :8002</code></div>
+<div class="server-pill">서버 구성 <code id="ports">:8000 :8001 :8002</code></div>
 </header>
 
 <div id="warn" class="warn" hidden></div>
@@ -121,7 +116,6 @@
 <path class="glyph" d="M338 142h24M338 150h24M338 158h24"/>
 <text x="350" y="206" class="lbl">메인 서버</text>
 <text x="350" y="224" class="lbl-sub" id="v-port-p">:8000 · 프록시</text>
-<text x="350" y="104" class="next" id="v-next">다음 → A</text>
 </g>
 <g class="vnode" id="v-a">
 <circle cx="660" cy="70" r="32" class="c-a"/>
@@ -158,25 +152,6 @@
 </div>
 </div>
 </section>
-
-<!-- 터미널 로그: 왼쪽 프록시, 오른쪽 백엔드 A/B -->
-<section class="logs wide">
-<div class="panel log">
-<div class="log-head"><b>메인 서버 (프록시)</b><span class="state" id="state-p">대기 중</span><code id="pane-p">:8000</code><span class="log-count"><b id="cnt-all2">0</b> 요청</span></div>
-<pre id="log-p" class="log-body"></pre>
-</div>
-<div class="log-col">
-<div class="panel log">
-<div class="log-head"><b>백엔드 A</b><code id="pane-a">:8001</code><span class="log-count a"><b id="cnt-a2">0</b> 처리</span></div>
-<pre id="log-a" class="log-body"></pre>
-</div>
-<div class="panel log">
-<div class="log-head"><b>백엔드 B</b><code id="pane-b">:8002</code><span class="log-count b"><b id="cnt-b2">0</b> 처리</span></div>
-<pre id="log-b" class="log-body"></pre>
-</div>
-</div>
-</section>
-<p class="foot">어느 백엔드인지는 실제 응답 본문("나는 서버 A")으로 판단합니다. <code>./demo/web.sh</code>를 띄운 진짜 터미널에도 같은 <code>-&gt; 127.0.0.1:8001</code> 줄이 찍힙니다.</p>
 
 </main>
 </div>
