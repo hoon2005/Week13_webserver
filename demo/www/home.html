@@ -26,11 +26,16 @@
 
 <section>
 <h2><span class="num">2</span> CGI: 서버가 프로그램을 실행해 응답을 만드는가</h2>
-<p>GET (주소에 값): <a href="/cgi-bin/adder?15&amp;27">/cgi-bin/adder?15&amp;27</a> → 42</p>
-<form action="/cgi-bin/adder" method="post">
-POST (본문에 값): <input name="a" value="100"> + <input name="b" value="23">
-<button type="submit">더하기</button> → 123
+<p>아무 숫자나 넣어 보세요. 답은 이 페이지에 없고, 누를 때마다 서버가 <code>adder</code> 프로그램을 실행해서 만듭니다.</p>
+<form action="/cgi-bin/adder" method="get">
+GET (값이 주소에 붙음): <input name="a"> + <input name="b">
+<button type="submit">더하기</button>
 </form>
+<form action="/cgi-bin/adder" method="post">
+POST (값이 본문에 담김): <input name="a"> + <input name="b">
+<button type="submit">더하기</button>
+</form>
+<p class="note">GET은 결과 페이지 주소창에 <code>?a=..&amp;b=..</code>가 보이고, POST는 주소창에 값이 없습니다.</p>
 </section>
 
 <section>
