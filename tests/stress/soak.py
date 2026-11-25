@@ -25,6 +25,9 @@ import tempfile
 import threading
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from test_output import print_case, print_suite  # noqa: E402
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "www")
 HOST = "127.0.0.1"
@@ -141,11 +144,19 @@ def start_servers(work, build):
     return proxy, backend
 
 
+def print_checks(checks):
+    """(이름, 설명, 통과 여부) 목록을 한 줄씩 출력하고 모두 통과했는지 돌려줌"""
+    for name, text, ok in checks:
+        print_case(name, text, "통과" if ok else "실패")
+    return all(ok for _, _, ok in checks)
+
+
 def asan_load(args, work):
     build = os.path.join(REPO_ROOT, "build")
     proxy, backend = start_servers(work, build)
     load = Load(proxy.port, args.conns)
-    print("asan-load: 개발 빌드(ASan), 동시 접속 %d개로 %d초 부하" % (args.conns, args.seconds))
+    print_suite("[부하 누수 검사] 개발 빌드(ASan), 동시 접속 %d개로 %d초 부하"
+                % (args.conns, args.seconds))
     load.start()
     time.sleep(args.seconds)
     load.stop()
@@ -153,12 +164,18 @@ def asan_load(args, work):
     logs = proxy.read_log() + backend.read_log()
     reports = [line for line in logs.splitlines()
                if "Sanitizer" in line or "runtime error" in line]
-    print("  요청 %d건 성공, 오류 %d건" % (load.ok, len(load.errors)))
-    print("  종료 코드: %s" % ", ".join("%s %d" % kv for kv in codes.items()))
-    print("  Sanitizer 보고: %s" % ("없음" if not reports else "\n    ".join(reports[:10])))
+    ok = print_checks([
+        ("requests", "요청 오류가 없는지 · 성공 %d건, 오류 %d건" % (load.ok, len(load.errors)),
+         not load.errors),
+        ("exit_codes", "정상 종료하는지 · %s" % ", ".join("%s %d" % kv for kv in codes.items()),
+         all(c == 0 for c in codes.values())),
+        ("sanitizer", "메모리 오류와 누수 보고가 없는지 · %d건" % len(reports), not reports),
+    ])
     for e in load.errors[:5]:
-        print("  오류 예: %s" % e)
-    return all(c == 0 for c in codes.values()) and not reports and not load.errors
+        print("    오류 예: %s" % e)
+    for line in reports[:10]:
+        print("    %s" % line)
+    return ok
 
 
 def snapshot(pid):
@@ -179,14 +196,16 @@ def snapshot(pid):
 
 def long_run(args, work):
     if not sys.platform.startswith("linux"):
-        print("long-run: /proc가 있는 Linux에서만 실행합니다")
-        return True
+        print_suite("[장시간 자원 검사] release 빌드")
+        print_case("long-run", "/proc가 있는 Linux에서만 실행합니다", "건너뜀")
+        return None
     build = os.path.join(REPO_ROOT, "build", "release")
     proxy, backend = start_servers(work, build)
     pid = proxy.proc.pid
     load = Load(proxy.port, args.conns)
-    print("long-run: release 빌드, 동시 접속 %d개로 %d분, %d초마다 기록 (프록시 프로세스)"
-          % (args.conns, args.minutes, args.interval))
+    print_suite("[장시간 자원 검사] release 빌드, 동시 접속 %d개로 %d분, %d초마다 기록 (프록시 프로세스)"
+                % (args.conns, args.minutes, args.interval))
+    time.sleep(1)  # 서버가 떴는지 확인한 연결이 정리되길 기다림 (시작 fd에 섞이지 않게)
     samples = [("시작", snapshot(pid))]
     load.start()
     end = time.monotonic() + args.minutes * 60
@@ -203,23 +222,24 @@ def long_run(args, work):
     for label, s in samples:
         print("  %-8s %6d %10d %8d %6d" % (label, s["fd"], s["rss_kb"], s["threads"],
                                           s["zombies"]))
-    print("  요청 %d건 성공, 오류 %d건" % (load.ok, len(load.errors)))
-
+    print()
     first, last = samples[0][1], samples[-1][1]
     during = [s for _, s in samples[1:-1]]
-    ok = True
-    for key in ("fd", "threads", "zombies"):
-        if last[key] != first[key]:
-            print("  실패: %s가 처음 %d에서 부하 뒤 %d" % (key, first[key], last[key]))
-            ok = False
     # RSS는 처음 몇 분 동안 늘 수 있음. 첫 기록 뒤로 계속 오르기만 하면 실패
     rss = [s["rss_kb"] for s in during]
-    if len(rss) >= 3 and all(b > a for a, b in zip(rss, rss[1:])):
-        print("  실패: RSS가 기록할 때마다 계속 올라감 %s" % rss)
-        ok = False
-    if load.errors:
-        print("  실패: 요청 오류 %s" % load.errors[:5])
-        ok = False
+    rising = len(rss) >= 3 and all(b > a for a, b in zip(rss, rss[1:]))
+    checks = [("requests", "요청 오류가 없는지 · 성공 %d건, 오류 %d건"
+               % (load.ok, len(load.errors)), not load.errors)]
+    for key, label in (("fd", "열린 fd"), ("threads", "스레드"), ("zombies", "좀비")):
+        checks.append((key, "%s 수가 처음과 같은지 · 처음 %d, 부하 뒤 %d"
+                       % (label, first[key], last[key]), last[key] == first[key]))
+    checks.append(("rss", "RSS가 기록할 때마다 계속 오르지 않는지 · %s"
+                   % ("%d~%d KB" % (min(rss), max(rss)) if rss else "기록 없음"), not rising))
+    ok = print_checks(checks)
+    if rising:
+        print("    RSS 기록: %s" % rss)
+    for e in load.errors[:5]:
+        print("    오류 예: %s" % e)
     return ok
 
 
@@ -237,8 +257,15 @@ def main():
         ok = asan_load(args, work) if args.check == "asan-load" else long_run(args, work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    print("결과: %s" % ("통과" if ok else "실패"))
-    sys.exit(0 if ok else 1)
+    title = "부하 누수 검사" if args.check == "asan-load" else "장시간 자원 검사"
+    if ok is None:
+        print("\n[%s 건너뜀]" % title)
+    elif ok:
+        print("\n[%s 완료] 통과" % title)
+    else:
+        sys.stdout.flush()
+        print("[실패] %s" % title, file=sys.stderr)
+    sys.exit(1 if ok is False else 0)
 
 
 if __name__ == "__main__":

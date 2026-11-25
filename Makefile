@@ -37,6 +37,7 @@ TEST_SRCS := $(wildcard tests/*_test.c)
 TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/test/%)
 
 FUNCTIONAL_TESTS := $(wildcard tests/functional/*_test.py)
+TEST_OUTPUT := python3 -B tests/test_output.py
 
 .PHONY: all test functional verify lint format release load tsan clean help
 
@@ -57,15 +58,14 @@ $(BUILD) $(BUILD)/obj $(BUILD)/test:
 -include $(wildcard $(BUILD)/*.d $(BUILD)/obj/*.d $(BUILD)/test/*.d)
 
 test: $(TEST_BINS)
-	@if [ -z "$(TEST_BINS)" ]; then echo "test: 단위 테스트 파일이 아직 없습니다"; fi
-	@set -e; for t in $(TEST_BINS); do echo "== $$t"; ./$$t; done
+	@$(TEST_OUTPUT) check unit $(BUILD) --unit $(TEST_BINS)
 
-# 기능 테스트는 실행 파일을 띄우고 바깥에서 요청을 보냅니다. -B는 .pyc를 만들지 않게 합니다.
+# 기능 테스트는 실제 서버를 띄워 요청을 보냅니다.
 functional: $(PROGRAMS)
-	@if [ -z "$(FUNCTIONAL_TESTS)" ]; then echo "functional: 기능 테스트 파일이 아직 없습니다"; fi
-	@set -e; for t in $(FUNCTIONAL_TESTS); do echo "== $$t"; python3 -B $$t $(BUILD); done
+	@$(TEST_OUTPUT) check functional $(BUILD) --functional $(FUNCTIONAL_TESTS)
 
-verify: all test functional lint
+verify: all
+	@$(TEST_OUTPUT) check verify $(BUILD) --unit $(TEST_BINS) --functional $(FUNCTIONAL_TESTS) --format $(FORMAT_FILES)
 
 # 코드 모양 검사입니다(CONVENTION.md의 "코드"). 모양은 .clang-format이 정합니다.
 # git이 아는 파일만 봅니다. 새 파일은 git add 뒤에 검사됩니다.
@@ -77,7 +77,9 @@ FORMAT_FILES   = $(filter-out $(FORMAT_IGNORE),$(shell git ls-files -- 'src/*.c'
 
 lint:
 	@if [ -z "$(FORMAT_FILES)" ]; then echo "lint: 검사할 C 파일이 아직 없습니다"; \
-	else clang-format --dry-run --Werror $(FORMAT_FILES) && echo "lint: 위반 없음"; fi
+	else clang-format --dry-run --Werror $(FORMAT_FILES) || { status=$$?; echo "[실패] 코드 포맷" >&2; exit $$status; }; \
+	    echo "lint: 위반 없음"; \
+	fi
 
 format:
 	@if [ -z "$(FORMAT_FILES)" ]; then echo "format: 고칠 C 파일이 아직 없습니다"; \
@@ -125,11 +127,9 @@ TSAN_PROGRAMS := $(MAIN_SRCS:src/main/%.c=$(TSAN_BUILD)/%)
 # 단위 테스트 뒤에는 TSan으로 빌드한 서버(tiny, adder)를 띄워 정적·CGI·중계 요청을
 # 동시에 보내고 종료까지 경합이 없는지 봅니다 (tests/tsan/server_tsan.py).
 tsan: $(TSAN_TESTS) $(TSAN_PROGRAMS)
-	@if [ -z "$(TSAN_TESTS)" ]; then echo "tsan: 단위 테스트 파일이 아직 없습니다"; fi
-	@set -e; for t in $(TSAN_TESTS); do echo "== $$t (tsan)"; TSAN_OPTIONS=exitcode=1 ./$$t; done
-	@echo "== tests/tsan/server_tsan.py"; python3 -B tests/tsan/server_tsan.py $(TSAN_BUILD)
+	@$(TEST_OUTPUT) check tsan $(TSAN_BUILD) --unit $(TSAN_TESTS) --functional tests/tsan/server_tsan.py
 
-$(TSAN_PROGRAMS): $(TSAN_BUILD)/%: src/main/%.c $(TSAN_LIB_OBJS) | $(TSAN_BUILD)
+$(TSAN_BUILD)/%: src/main/%.c $(TSAN_LIB_OBJS) | $(TSAN_BUILD)
 	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $< $(TSAN_LIB_OBJS) -fsanitize=thread -pthread -o $@
 
 $(TSAN_BUILD)/%_test: tests/%_test.c tests/acutest.h $(TSAN_LIB_OBJS) | $(TSAN_BUILD)
@@ -155,5 +155,5 @@ help:
 	@echo "make verify     CI와 같은 전체 검증: all + test + functional + lint"
 	@echo "make release    부하 테스트용 -O2 빌드: build/release/<이름>"
 	@echo "make load       부하 측정 전부 (wrk, ab 필요, 30분쯤): build/load/<시각>/"
-	@echo "make tsan       단위 테스트를 ThreadSanitizer로 실행"
+	@echo "make tsan       단위·서버 동시성 테스트를 ThreadSanitizer로 실행"
 	@echo "make clean      build/ 삭제"

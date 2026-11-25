@@ -50,6 +50,9 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from test_output import print_case, print_suite  # noqa: E402
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "www")
 RELEASE_DIR = os.path.join(REPO_ROOT, "build", "release")
@@ -295,11 +298,11 @@ class Runner:
         result["rps_runs"] = [round(r["rps"], 1) for r in runs]
         result["tool_limited"] = mid["tool_cpu"] >= 90 * mid["tool_threads"]
         result["cpu_shared"] = mid["server_cpu"] + mid["tool_cpu"] >= 90 * NCPU
-        line = "  %-9s %10.1f req/s  p50 %8.3fms  p99 %8.3fms  오류 %d  CPU 서버 %5.1f%% 도구 %5.1f%%%s" % (
-            label or "-c %d" % conns, result["rps"], result["p50"] or 0, result["p99"] or 0, result["errors"],
+        text = "%10.1f req/s  p50 %8.3fms  p99 %8.3fms  오류 %d  CPU 서버 %5.1f%% 도구 %5.1f%%%s" % (
+            result["rps"], result["p50"] or 0, result["p99"] or 0, result["errors"],
             result["server_cpu"], result["tool_cpu"],
-            "  [도구 한계]" if result["tool_limited"] else "")
-        print(line, flush=True)
+            "  도구 한계" if result["tool_limited"] else "")
+        print_case(label or "-c %d" % conns, text, "실패" if result["errors"] else "통과")
         return result
 
     def series_a(self, name, tool="wrk"):
@@ -392,7 +395,10 @@ def write_md(path, data):
 def summary_line(name, m):
     pts = m["points"]
     best = max(pts, key=lambda p: p["rps"])
-    verdict = "통과" if m["passed"] else "실패(오류 %d)" % m["errors"]
+    failed_exits = [code for code in m["stop_codes"] if code != 0]
+    verdict = "통과" if m["passed"] else "실패 (요청 오류 %d건)" % m["errors"]
+    if failed_exits:
+        verdict += ", 서버 종료 코드 %s" % failed_exits
     if name == "threads":
         return "%s. -c %d에서 --threads %d일 때 최고 %.0f req/s (p99 %sms)" % (
             verdict, m["conns"], best["threads"], best["rps"], fmt(best["p99"], 2))
@@ -546,14 +552,14 @@ def main():
         for name in names:
             if name in A_TARGETS:
                 sid, desc, _ = A_TARGETS[name]
-                print("== %s: %s" % (sid, desc), flush=True)
+                print_suite("[성능 측정] %s · %s" % (sid, desc))
                 m = runner.series_a(name)
                 if name == "static-small":
                     m["saturation"] = saturation(m["points"])
                     print("  포화 지점: -c %d" % m["saturation"])
             elif name == "keepalive-off":
                 sid, desc = "load-keepalive-off", "연결 유지 끔 (ab, -k 없음, home.html)"
-                print("== %s: %s" % (sid, desc), flush=True)
+                print_suite("[성능 측정] %s · %s" % (sid, desc))
                 m = runner.series_a("static-small", tool="ab")
                 m["saturation"] = saturation(m["points"])
                 print("  포화 지점: -c %d" % m["saturation"])
@@ -568,7 +574,7 @@ def main():
                         sys.exit("B의 -c를 정할 수 없습니다. static-small을 먼저 돌리거나 --sat-conns를 주세요")
                     print("  (이전 결과 %s의 포화 지점 사용)" % src)
                 desc = "작업 스레드 수 효과 (home.html, -c %d)" % sat
-                print("== %s: %s" % (sid, desc), flush=True)
+                print_suite("[성능 측정] %s · %s" % (sid, desc))
                 m = runner.series_b(sat)
             m["id"], m["desc"] = sid, desc
             m["errors"] = sum(p["errors"] for p in m["points"])
@@ -578,14 +584,22 @@ def main():
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
+    print_suite("[성능 측정] 요약")
+    for name, measurement in data["measurements"].items():
+        text = summary_line(name, measurement)
+        if measurement["passed"]:
+            text = text.split(". ", 1)[1]
+        print_case(measurement["id"], text, "통과" if measurement["passed"] else "실패")
+
     print("\n결과: %s" % out_dir)
     print("  report.md   시트에 옮길 표")
     print("  report.html 그래프 (WSL에서 열기: cd %s && explorer.exe report.html)" % out_dir)
     failed = [m["id"] for m in data["measurements"].values() if not m["passed"]]
     if failed:
-        print("실패: " + ", ".join(failed))
+        sys.stdout.flush()
+        print("[실패] " + ", ".join(failed), file=sys.stderr)
         return 1
-    print("전부 통과 (오류 0, 서버 정상 종료)")
+    print("\n[성능 측정 완료] %d개 통과 (오류 0, 서버 정상 종료)" % len(data["measurements"]))
     return 0
 
 

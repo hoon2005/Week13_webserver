@@ -21,6 +21,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from test_output import print_case, print_suite  # noqa: E402
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FIXTURE_DIR = os.path.join(REPO_ROOT, "tests", "fixtures", "www")
@@ -78,10 +83,10 @@ def timed_get(port, path="/home.html", timeout=300):
     return status, time.monotonic() - start
 
 
-def report(title, how, result):
-    print("\n[%s]" % title)
-    print("  방법: %s" % how)
-    print("  결과: %s" % result)
+def report(name, how, expected, result):
+    print_case(name, how, "수동 확인")
+    print("    기대: %s" % expected)
+    print("    결과: %s" % result, flush=True)
 
 
 # ============================== 시나리오 ==============================
@@ -97,10 +102,9 @@ def scenario1(www, conns):
             s.close()
     finally:
         server.stop()
-    report("시나리오 1. 아무것도 안 보내는 연결 %d개" % conns,
-           "연결만 %d개 열어 두고 정상 손님이 home.html 요청" % conns,
-           "%s, %.1f초 대기 (예상: %d개 ÷ 16명 × 5초 ≈ %.0f초)"
-           % (status, sec, conns, conns / 16 * 5))
+    report("conn-idle-flood", "1. 연결만 %d개 열어 둔 뒤 정상 요청" % conns,
+           "200, 대기 %.1f초 이하 (%d개 ÷ 16명 × 5초)" % (conns / 16 * 5, conns),
+           "%s, %.1f초 대기" % (status, sec))
 
 
 def scenario2(www):
@@ -136,28 +140,32 @@ def scenario2(www):
             t.join()
     finally:
         server.stop()
-    report("시나리오 2. keep-alive 연결 16개가 4초마다 요청",
-           "작업자 16명을 붙잡은 상태에서 정상 손님이 요청",
-           "%s, %.1f초 대기 (공격 연결이 요청 5번을 마치고 끊길 때까지)" % (status, sec))
+    report("keep-alive-hog", "2. keep-alive 연결 16개가 4초마다 요청하는 동안 정상 요청",
+           "공격 연결이 요청 5번을 마치고 끊긴 뒤 200",
+           "%s, %.1f초 대기" % (status, sec))
 
 
 def scenario3(www):
     server = Tiny(www)
     try:
-        threads = [threading.Thread(target=timed_get,
-                                    args=(server.port, "/cgi-bin/slow"))
-                   for _ in range(16)]
-        for t in threads:
-            t.start()
-        time.sleep(0.5)
-        status, sec = timed_get(server.port)
-        for t in threads:
-            t.join()
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            cgi_requests = [pool.submit(timed_get, server.port, "/cgi-bin/slow")
+                            for _ in range(16)]
+            time.sleep(0.5)
+            static_status, static_sec = timed_get(server.port)
+            cgi_results = [request.result() for request in cgi_requests]
     finally:
         server.stop()
-    report("시나리오 3. 느린 CGI 16개로 작업자 모두 점유",
-           "sleep 30 하는 CGI 16개를 보낸 뒤 정상 손님이 정적 파일 요청",
-           "%s, %.1f초 대기 (CGI 제한 10초에 풀림)" % (status, sec))
+
+    status_counts = Counter(status for status, _ in cgi_results)
+    codes = ", ".join("%s %d건" % (status, count)
+                      for status, count in sorted(status_counts.items()))
+    durations = [sec for _, sec in cgi_results]
+    report("cgi-slow-saturate", "3. sleep 30 하는 CGI 16개를 보낸 뒤 정적 파일 요청",
+           "CGI 16건 모두 504 (제한 10초) / 정적 요청 200",
+           "CGI %d건: %s (%.1f~%.1f초) / 정적 요청 %s, %.1f초 대기"
+           % (len(cgi_results), codes, min(durations), max(durations),
+              static_status, static_sec))
 
 
 def scenario4(www):
@@ -184,8 +192,8 @@ def scenario4(www):
         for p in procs:
             p.kill()
             p.wait()
-    report("시나리오 4. 프록시 두 대가 서로를 가리킴 (A→B→A)",
-           "A의 /api → B, B의 /api → A로 설정하고 A에 /api/x 요청",
+    report("proxy-loop", "4. 서로를 가리키는 프록시 두 대(A→B→A)에 요청",
+           "순환 요청 504 (제한 3초) / 정적 요청 200",
            "순환 요청 %s, %.1f초 / 그동안 다른 손님의 정적 요청 %s, %.1f초 대기"
            % (status, sec, result["static"][0], result["static"][1]))
 
@@ -202,8 +210,8 @@ def scenario5(www):
         after, _ = timed_get(server.port)
     finally:
         server.stop()
-    report("시나리오 5. 헤더 폭탄 (100바이트 헤더 200줄, 약 20 KiB)",
-           "큰 헤더를 붙인 요청을 보내고 이어서 정상 요청",
+    report("parse-header-size", "5. 약 20 KiB 헤더(100바이트 200줄) 요청 뒤 정상 요청",
+           "큰 헤더 요청 400 / 그 뒤 정상 요청 200",
            "%s (%.3f초) / 그 뒤 정상 요청 %s" % (first, sec, after))
 
 
@@ -228,12 +236,13 @@ def main():
     runners = {1: lambda: scenario1(www, args.conns), 2: lambda: scenario2(www),
                3: lambda: scenario3(www), 4: lambda: scenario4(www),
                5: lambda: scenario5(www)}
-    print("release 빌드, 작업자 16명, 읽기 타임아웃 5초")
+    print_suite("[스트레스 테스트] release 빌드, 작업자 16명, 읽기 타임아웃 5초")
     try:
         for n in args.scenarios:
             runners[n]()
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    print("\n[스트레스 테스트 완료] %d개 실행 · 기대와 결과를 직접 대조하세요" % len(args.scenarios))
 
 
 if __name__ == "__main__":
