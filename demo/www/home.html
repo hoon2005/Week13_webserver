@@ -6,31 +6,39 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<header>
 <h1>Tiny 웹 서버 데모</h1>
-<p class="sub">이 페이지는 우리 팀이 만든 C 웹 서버가 <code>demo/www/</code>에서 보내고 있습니다.</p>
+<p class="sub">이 페이지는 우리 팀이 C로 만든 웹 서버가 <code>demo/www/</code> 폴더에서 보내고 있습니다.</p>
+<p class="tip">개발자 도구 → Network 탭 → "Disable cache"를 켜고 보세요.</p>
+</header>
 
 <section>
-<h2>1. 정적 파일 (HTML, CSS, JS, 이미지)</h2>
-<p>이 글꼴과 테두리는 <code>style.css</code>가 <code>text/css</code>로 와야 보입니다.</p>
-<p id="js">app.js가 실행되지 않았습니다</p>
-<img src="crying_cat.jpg" alt="crying_cat.jpg" width="400">
+<h2><span class="num">1</span> 정적 파일: 파일 종류(MIME)를 맞게 보내는가</h2>
+<table>
+<tr><th>파일</th><th>Network 탭에서 볼 Content-Type</th><th>맞으면 보이는 것</th></tr>
+<tr><td><code>home.html</code></td><td><code>text/html</code></td><td>이 페이지</td></tr>
+<tr><td><code>style.css</code></td><td><code>text/css</code></td><td>글꼴, 테두리, 색</td></tr>
+<tr><td><code>app.js</code></td><td><code>text/javascript</code></td><td id="js" class="bad">❌ JS가 실행되지 않음</td></tr>
+<tr><td><code>crying_cat.jpg</code></td><td><code>image/jpeg</code></td><td>아래 고양이</td></tr>
+</table>
+<img src="crying_cat.jpg" alt="우는 고양이" width="400">
 </section>
 
 <section>
-<h2>2. CGI (동적 콘텐츠)</h2>
-<p>GET: <a href="/cgi-bin/adder?15&amp;27">/cgi-bin/adder?15&amp;27</a></p>
+<h2><span class="num">2</span> CGI: 서버가 프로그램을 실행해 응답을 만드는가</h2>
+<p>GET (주소에 값): <a href="/cgi-bin/adder?15&amp;27">/cgi-bin/adder?15&amp;27</a> → 42</p>
 <form action="/cgi-bin/adder" method="post">
-POST: <input name="a" value="100"> + <input name="b" value="23">
-<button type="submit">더하기</button>
+POST (본문에 값): <input name="a" value="100"> + <input name="b" value="23">
+<button type="submit">더하기</button> → 123
 </form>
 </section>
 
 <section>
-<h2>3. 오류 페이지</h2>
-<p><a href="/nope.html">/nope.html</a> → 404 Not Found</p>
-<p>나머지 오류(400, 403, 413, 500, 502, 504)는 터미널에서
-<code>python3 demo/errors.py</code>로 보여줍니다.</p>
+<h2><span class="num">3</span> 오류: 없는 파일을 404로 알려주는가</h2>
+<p><a href="/nope.html">/nope.html</a> → Network 탭에 <code>404</code>, 화면에 "Tiny couldn't find this file"</p>
+<p class="note">403, 413, 502, 504처럼 브라우저로 만들기 어려운 오류는 터미널에서 <code>curl</code>, <code>nc</code>로 보여줍니다.</p>
 </section>
+
 <script src="app.js"></script>
 </body>
 </html>
