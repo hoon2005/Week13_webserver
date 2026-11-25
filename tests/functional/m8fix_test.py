@@ -158,5 +158,37 @@ class F4Head204Test(unittest.TestCase):
             server.stop()
 
 
+class F5HeadErrorBodyTest(unittest.TestCase):
+    """F5: HEAD 요청의 버전·URI 검사에서 오류가 나면 HTML 본문이 붙음"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def raw(self, data):
+        with self.server.connect() as sock:
+            sock.sendall(data)
+            out = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return out
+                out += chunk
+
+    def test_head_request_line_errors_have_no_body(self):
+        for line, status in ((b"HEAD / HTTP/2.0", b"505"),
+                             (b"HEAD ./x HTTP/1.1", b"400"),
+                             (b"HEAD / HTTP/1.1 extra", b"400")):
+            with self.subTest(line=line):
+                out = self.raw(line + b"\r\nHost: x\r\n\r\n")
+                head, _, body = out.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 " + status), head)
+                self.assertEqual(body, b"")
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

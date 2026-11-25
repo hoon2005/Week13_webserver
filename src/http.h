@@ -67,6 +67,7 @@ void http_request_free(struct http_request *req);
  *   찼으면 너무 긴 요청 줄(414), 그보다 짧은데 줄바꿈이 없으면 400입니다.
  * 반환: 0, 400 (형식, 제어 문자, URI가 '/'로 시작하지 않음, 메서드가 토큰이
  *       아님), 414, 501 (모르는 메서드), 505
+ *   실패해도 메서드가 GET, POST, HEAD면 req->method는 채움 (HEAD 오류 응답의 본문을 뺌)
  */
 int http_parse_request_line(struct http_request *req, const char *line,
                             size_t len, size_t maxlen);

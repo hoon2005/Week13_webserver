@@ -280,6 +280,36 @@ static void test_request_validation(void)
     free(req);
 }
 
+/* F5: 요청 줄의 다른 부분에서 실패해도 HEAD인지는 알아 둠 (오류 응답의 본문을 빼려고) */
+static void test_method_saved_before_other_checks(void)
+{
+    struct http_request *req = new_request();
+    char longline[HTTP_LINE_MAX];
+
+    TEST_CHECK(parse_line(req, "HEAD / HTTP/2.0\r\n") == 505);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "head ./x HTTP/1.1\r\n") == 400);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "HEAD / HTTP/1.1 extra\r\n") == 400);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+
+    /* 줄바꿈 없이 버퍼가 다 찬 414에서도 첫 조각이 HEAD면 알아 둠 */
+    http_request_init(req);
+    memset(longline, 'a', sizeof(longline));
+    memcpy(longline, "HEAD /", 6);
+    TEST_CHECK(http_parse_request_line(req, longline, sizeof(longline) - 1,
+                                       sizeof(longline)) == 414);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+
+    /* 모르는 메서드나 토큰이 아닌 메서드는 저장하지 않음 */
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "PUT / HTTP/2.0\r\n") == 505);
+    TEST_CHECK(req->method[0] == '\0');
+    free(req);
+}
+
 static void test_mime(void)
 {
     TEST_CHECK(strcmp(http_mime_type("./home.html"), "text/html") == 0);
@@ -302,5 +332,7 @@ TEST_LIST = {
     {"unknown_header_kept_in_raw_block", test_unknown_header_kept_in_raw_block},
     {"bad_header_lines", test_bad_header_lines},
     {"request_validation", test_request_validation},
+    {"요청 줄 검사에 실패해도 HEAD 메서드는 먼저 저장한다",
+     test_method_saved_before_other_checks},
     {"mime", test_mime},
     {NULL, NULL}};

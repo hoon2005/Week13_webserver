@@ -86,6 +86,31 @@ static int version_parse(const char *v, int *major, int *minor)
     return 0;
 }
 
+/*
+ * 줄 앞의 메서드가 GET, POST, HEAD 중 하나면 먼저 저장 (F5).
+ * 버전이나 URI 검사에서 실패해도 오류 응답이 HEAD인지 알아서 본문을 뺄 수 있음.
+ * 모르는 메서드는 저장하지 않음 (아래 검사가 400, 501을 정함).
+ */
+static void method_store_early(struct http_request *req, const char *line,
+                               size_t len)
+{
+    static const char *const known[] = {"GET", "POST", "HEAD"};
+    size_t n = 0;
+
+    while (n < len && http_is_token(line + n, 1)) {
+        n++;
+    }
+    if (n == len || !is_space(line[n])) {
+        return; /* 메서드 뒤에 공백이 없으면 요청 줄 형식이 아님 */
+    }
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        if (strlen(known[i]) == n && strncasecmp(line, known[i], n) == 0) {
+            strcpy(req->method, known[i]);
+            return;
+        }
+    }
+}
+
 int http_parse_request_line(struct http_request *req, const char *line,
                             size_t len, size_t maxlen)
 {
@@ -98,6 +123,7 @@ int http_parse_request_line(struct http_request *req, const char *line,
     if (len == 0) {
         return 400;
     }
+    method_store_early(req, line, len);
     /* 줄바꿈이 없음: 버퍼가 다 찼으면 너무 긴 줄, 아니면 중간에 끊긴 줄 */
     if (line[len - 1] != '\n') {
         return (len >= maxlen - 1) ? 414 : 400;
