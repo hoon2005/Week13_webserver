@@ -8,8 +8,10 @@ SIGTERM으로 끕니다. 경합이 하나라도 보고되면 종료 코드가 0�
 
 import os
 import signal
+import subprocess
 import sys
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
@@ -18,6 +20,34 @@ from m6m7_test import Server  # noqa: E402  (BUILD_DIR은 sys.argv[1]에서 읽�
 
 # 경고가 나도 끝까지 돌고, 끝날 때 종료 코드로 알림
 ENV = dict(os.environ, TSAN_OPTIONS="halt_on_error=0 exitcode=66")
+# TSan 빌드는 느리므로 요청 하나를 넉넉히 기다림 (기능 테스트의 기본값은 5초)
+REQUEST_TIMEOUT = 30
+
+
+def get(server, path, timeout=REQUEST_TIMEOUT):
+    return server.exchange(("GET %s HTTP/1.1\r\nHost: x\r\n\r\n" % path).encode(),
+                           timeout=timeout)[0]
+
+
+def diagnose(servers):
+    """실패했을 때 원인을 볼 수 있게 서버 상태, 로그, 스레드 스택을 모음.
+    macOS CI에서 요청이 전부 시간 초과로 끝난 적이 있어, 다음 실행에서 원인을 보려고 넣음"""
+    out = []
+    for name, server in servers:
+        out.append("== %s (pid %d, 종료 코드 %s)" % (name, server.proc.pid, server.proc.poll()))
+        out.append(server.read_log()[-3000:])
+        if server.proc.poll() is not None:
+            continue
+        if sys.platform == "darwin":
+            cmd = ["sample", str(server.proc.pid), "1"]
+        else:
+            cmd = ["gdb", "-p", str(server.proc.pid), "-batch", "-ex", "thread apply all bt"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            out.append("-- 스레드 스택 (%s)\n%s" % (cmd[0], (r.stdout + r.stderr)[-12000:]))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out.append("-- 스레드 스택을 못 얻음: %r" % e)
+    return "\n".join(out)
 
 
 class TsanServerTest(unittest.TestCase):
@@ -27,6 +57,7 @@ class TsanServerTest(unittest.TestCase):
         with open(os.path.join(backend.www, "api", "home.html"), "w") as f:
             f.write("<p>backend</p>")
         proxy = Server("--route", "/api=127.0.0.1:%d" % backend.port, env=ENV)
+        servers = (("proxy", proxy), ("backend", backend))
         paths = ("/home.html", "/cgi-bin/adder?1&2", "/api/home.html")
         results = []
         lock = threading.Lock()
@@ -34,19 +65,29 @@ class TsanServerTest(unittest.TestCase):
         def worker(i):
             for j in range(6):
                 try:
-                    status = proxy.get(paths[(i + j) % 3])[0]
+                    status = get(proxy, paths[(i + j) % 3])
                 except OSError as e:
                     status = repr(e)
                 with lock:
                     results.append(status)
 
         try:
+            # 먼저 하나씩 보내 봄: 느린 것인지, 아예 응답하지 않는 것인지 구분
+            for path in paths:
+                started = time.monotonic()
+                try:
+                    status = get(proxy, path, timeout=60)
+                except OSError as e:
+                    self.fail("첫 요청 %s: %r (%.1f초)\n%s" % (
+                        path, e, time.monotonic() - started, diagnose(servers)))
+                self.assertEqual(status, 200, path)
             threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
-            self.assertEqual(results, [200] * len(results))
+            if results != [200] * len(results):
+                self.fail("동시 요청 결과 %r\n%s" % (results, diagnose(servers)))
             for server in (proxy, backend):
                 server.proc.send_signal(signal.SIGTERM)
                 code = server.wait_exit(30)
