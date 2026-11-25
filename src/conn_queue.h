@@ -1,5 +1,5 @@
 /*
- * conn_queue - 스레드 풀의 작업 큐입니다 (final.md 2.2).
+ * conn_queue - 스레드 풀의 작업 큐입니다 (m4m5.md 2.2).
  *   main 스레드가 accept한 connfd를 넣고, 작업자 스레드가 꺼냅니다.
  *   고정 크기 원형 배열 + mutex 1개 + 조건 변수 2개(not_empty, not_full).
  */

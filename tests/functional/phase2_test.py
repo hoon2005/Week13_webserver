@@ -289,11 +289,13 @@ class Phase2Test(unittest.TestCase):
             self.assertEqual(status, 414)
             self.assertEqual(len(body), int(headers["content-length"]))
 
-    def test_static_post_is_501_and_keeps_connection(self):
+    def test_static_post_is_405_and_keeps_connection(self):
+        # M7-3에서 501 → 405 + Allow로 바뀜 (docs/prd/m6m7.md)
         status, headers, _, _ = exchange(
             self.server, b"POST /home.html HTTP/1.1\r\nHost: x\r\n\r\n"
         )
-        self.assertEqual(status, 501)
+        self.assertEqual(status, 405)
+        self.assertEqual(headers["allow"], "GET, HEAD")
         self.assertEqual(headers["connection"], "keep-alive")
 
     def test_body_cut_off_does_not_hurt_server(self):
@@ -314,11 +316,14 @@ class Phase2Test(unittest.TestCase):
         self.assertEqual(int(headers["content-length"]), size)
         self.assertEqual(body, b"")
 
-    def test_head_on_cgi_is_501(self):
-        status, _, _, _ = exchange(
+    def test_head_on_cgi_is_405(self):
+        # M7-3에서 501 → 405 + Allow로 바뀜 (docs/prd/m6m7.md)
+        status, headers, body, _ = exchange(
             self.server, b"HEAD /cgi-bin/adder HTTP/1.1\r\nHost: x\r\n\r\n"
         )
-        self.assertEqual(status, 501)
+        self.assertEqual(status, 405)
+        self.assertEqual(headers["allow"], "GET, POST")
+        self.assertEqual(body, b"")
 
     def test_mime(self):
         for path, expected in [

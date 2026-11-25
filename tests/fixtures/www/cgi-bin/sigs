@@ -1,0 +1,4 @@
+#!/bin/sh
+# 테스트용 CGI: 막힌 시그널(SigBlk)과 무시하는 시그널(SigIgn)을 출력 (Linux, M7-9)
+printf "Content-type: text/plain\r\n\r\n"
+grep -E '^(SigBlk|SigIgn):' /proc/self/status

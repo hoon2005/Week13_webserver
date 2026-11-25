@@ -1,5 +1,5 @@
 /*
- * http - 요청 줄, 헤더 해석과 MIME 판단 (final.md 3장)
+ * http - 요청 줄, 헤더 해석과 MIME 판단 (m4m5.md 3장)
  */
 #include "http.h"
 
@@ -24,6 +24,40 @@ void http_request_free(struct http_request *req)
 static int is_space(char c)
 {
     return c == ' ' || c == '\t';
+}
+
+/* RFC 9110 5.6.2 토큰 글자: 영문자, 숫자, ! # $ % & ' * + - . ^ _ ` | ~ */
+static int is_tchar(unsigned char c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9')) {
+        return 1;
+    }
+    return c != '\0' && strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
+int http_is_token(const char *s, size_t len)
+{
+    if (len == 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (!is_tchar((unsigned char)s[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int http_has_ctl(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c < 0x20 && c != '\t') || c == 0x7f) {
+            return 1; /* NUL, 줄 중간의 CR 등 */
+        }
+    }
+    return 0;
 }
 
 /* 줄 끝의 \r\n 또는 \n을 뺀 길이 */
@@ -69,6 +103,9 @@ int http_parse_request_line(struct http_request *req, const char *line,
         return (len >= maxlen - 1) ? 414 : 400;
     }
     end = line_content_len(line, len);
+    if (http_has_ctl(line, end)) {
+        return 400; /* 탭이 아닌 제어 문자 (M7-1) */
+    }
 
     /* 공백으로 나눈 조각이 정확히 세 개(메서드, URI, 버전)여야 함 */
     while (i < end) {
@@ -106,14 +143,22 @@ int http_parse_request_line(struct http_request *req, const char *line,
     }
     req->minor = minor;
 
-    /* URI (요청 줄 전체가 HTTP_LINE_MAX 안이므로 넘치지 않음) */
+    /* URI: '/'로 시작해야 함 (M7-1). 정적 경로는 "." + URI라 "./x"는 "../x"가 됨 */
+    if (tok[1][0] != '/') {
+        return 400;
+    }
+    /* 요청 줄 전체가 HTTP_LINE_MAX 안이므로 넘치지 않음 */
     if (tok_len[1] >= sizeof(req->uri)) {
         return 414;
     }
     memcpy(req->uri, tok[1], tok_len[1]);
     req->uri[tok_len[1]] = '\0';
 
-    /* 메서드: GET, POST, HEAD만. 대소문자는 Phase 1처럼 구분하지 않음 */
+    /* 메서드: 토큰이 아니면 400, 형식은 맞지만 GET, POST, HEAD가 아니면 501 (M7-2).
+     * 대소문자는 Phase 1처럼 구분하지 않음 */
+    if (!http_is_token(tok[0], tok_len[0])) {
+        return 400;
+    }
     if (tok_len[0] >= HTTP_METHOD_MAX) {
         return 501;
     }
@@ -202,6 +247,9 @@ int http_parse_header_line(struct http_request *req, const char *line,
     if (end == 0) {
         return 1; /* 빈 줄: 헤더 끝 */
     }
+    if (http_has_ctl(line, end)) {
+        return 400; /* 한 줄로 본 헤더를 백엔드가 두 줄로 나누지 않게 (M7-1) */
+    }
 
     /* 원본 헤더 블록에 이어 붙임. 차면 그 자체가 헤더 전체 8 KiB 상한 */
     if (req->raw_len + len > sizeof(req->raw_headers)) {
@@ -215,10 +263,8 @@ int http_parse_header_line(struct http_request *req, const char *line,
         return 400; /* ':'가 없거나 이름이 비었음 */
     }
     name_len = (size_t)(colon - line);
-    for (size_t i = 0; i < name_len; i++) {
-        if (is_space(line[i])) {
-            return 400; /* 이름 안이나 ':' 앞의 공백은 허용하지 않음 */
-        }
+    if (!http_is_token(line, name_len)) {
+        return 400; /* 이름은 토큰만. ':' 앞의 공백도 여기서 걸림 (M7-1) */
     }
     memcpy(name, line, name_len);
     name[name_len] = '\0';
@@ -355,6 +401,8 @@ const char *http_status_text(int status)
         return "Forbidden";
     case 404:
         return "Not Found";
+    case 405:
+        return "Method Not Allowed";
     case 411:
         return "Length Required";
     case 413:
@@ -367,6 +415,8 @@ const char *http_status_text(int status)
         return "Internal Server Error";
     case 501:
         return "Not Implemented";
+    case 502:
+        return "Bad Gateway";
     case 503:
         return "Service Unavailable";
     case 504:
