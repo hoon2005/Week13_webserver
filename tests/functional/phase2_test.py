@@ -1,4 +1,4 @@
-"""Phase 2(M4 동시성, M5 HTTP 완성) 기능 테스트입니다. docs/prd/final.md 8장.
+"""Phase 2(M4 동시성, M5 HTTP 완성) 기능 테스트입니다. docs/prd/m4m5.md 8장.
 
 사용법: python3 phase2_test.py <build 폴더>
 

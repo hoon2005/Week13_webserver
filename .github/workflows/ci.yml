@@ -33,5 +33,5 @@ jobs:
       - run: pip install clang-format==21.1.8
       - run: clang-format --version
       - run: make verify
-      # 스레드 풀의 작업 큐를 ThreadSanitizer로 검사합니다 (final.md 8.6).
+      # 스레드 풀의 작업 큐를 ThreadSanitizer로 검사합니다 (m4m5.md 8.6).
       - run: make tsan
