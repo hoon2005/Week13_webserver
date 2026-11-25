@@ -289,5 +289,50 @@ class F8CgiOutputRulesTest(unittest.TestCase):
         self.assertEqual(body, b"BODY")
 
 
+class F9QueryAndCgiPathTest(unittest.TestCase):
+    """F9: 쿼리까지 파일 이름에 넣거나 CGI로 잘못 분류해 404·403으로 실패 (권장안 A)"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+        www = cls.server.www
+        os.makedirs(os.path.join(www, "docs"))
+        with open(os.path.join(www, "docs", "cgi-bin-notes.html"), "w") as f:
+            f.write("<p>notes</p>")
+        os.makedirs(os.path.join(www, "a", "cgi-bin"))
+        script = os.path.join(www, "a", "cgi-bin", "hello")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\nprintf 'Content-type: text/plain\\r\\n\\r\\nfrom cgi'\n")
+        os.chmod(script, 0o755)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_static_file_with_query_is_found(self):
+        status, headers, _ = self.server.get("/style.css?v=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/css")
+        status, _, _ = self.server.get("/?v=2")
+        self.assertEqual(status, 200)  # 폴더 → home.html
+
+    def test_query_text_does_not_make_cgi(self):
+        status, headers, _ = self.server.get("/home.html?from=cgi-bin")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/html")
+
+    def test_cgi_only_when_first_segment_is_cgi_bin(self):
+        status, _, body = self.server.get("/docs/cgi-bin-notes.html")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"<p>notes</p>")
+        # 첫 조각이 아니면 정적 파일 (동작 변경: 전에는 CGI로 실행됨)
+        status, _, body = self.server.get("/a/cgi-bin/hello")
+        self.assertEqual(status, 200)
+        self.assertTrue(body.startswith(b"#!/bin/sh"), body)
+        # 첫 조각이 cgi-bin이면 지금처럼 CGI
+        status, _, body = self.server.get("/cgi-bin/adder?1&2")
+        self.assertIn(b"1 + 2 = 3", body)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

@@ -1084,23 +1084,27 @@ static int request_route(int fd, struct http_request *req, int *keep)
 }
 
 /*
- * URI를 정적/동적으로 나누고 파일 경로와 CGI 인자를 만듭니다 (Phase 1 규칙).
+ * URI를 정적/동적으로 나누고 파일 경로와 CGI 인자를 만듭니다.
  * 정적 1, 동적 0, 경로가 버퍼보다 길면 -1. URI는 바꾸지 않음 (로그에 원본 유지).
+ *   '?' 앞이 경로, 뒤가 쿼리. 라우팅(M6-6)과 경로 검사(M6-7)와 같은 기준 (F9)
+ *   경로의 첫 조각이 cgi-bin일 때만 CGI. "/docs/cgi-bin-notes.html"이나
+ *   "/home.html?x=cgi-bin"은 정적 파일
+ *   정적 파일은 쿼리를 떼고 찾음: "/style.css?v=2" → ./style.css
  */
 static int uri_parse(const char *uri, char *filename, char *cgiargs)
 {
-    const char *question;
-    size_t path_len;
+    const char *question = strchr(uri, '?');
+    size_t path_len = question ? (size_t)(question - uri) : strlen(uri);
+    int is_cgi = path_len >= 8 && strncmp(uri, "/cgi-bin", 8) == 0 &&
+                 (path_len == 8 || uri[8] == '/');
     int n;
 
-    if (!strstr(uri, "cgi-bin")) {
+    if (!is_cgi) {
         cgiargs[0] = '\0';
-        n = snprintf(filename, MAXLINE, ".%s%s", uri,
-                     uri[strlen(uri) - 1] == '/' ? "home.html" : "");
+        n = snprintf(filename, MAXLINE, ".%.*s%s", (int)path_len, uri,
+                     uri[path_len - 1] == '/' ? "home.html" : "");
         return (n < 0 || n >= MAXLINE) ? -1 : 1;
     }
-    question = strchr(uri, '?');
-    path_len = question ? (size_t)(question - uri) : strlen(uri);
     if (question) {
         n = snprintf(cgiargs, MAXLINE, "%s", question + 1);
         if (n < 0 || n >= MAXLINE) {
