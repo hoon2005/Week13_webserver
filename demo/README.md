@@ -5,6 +5,7 @@
 
 | 파일 | 보여주는 것 | 걸리는 시간 |
 |---|---|---|
+| `demo/web.sh` | 브라우저로 보는 데모 페이지(`demo/www/`): 정적 파일, CGI, 404 | Ctrl+C로 끔 |
 | `demo/errors.py` | 이상한 요청과 실패 상황에서 맞는 상태 코드로 답하고, 그 뒤에도 서버가 살아 있음 | 약 12초 (`--fast`면 2초) |
 | `demo/lb.sh` | 서버 3개(프록시 + 백엔드 A, B)로 Round-Robin, 백엔드 장애 대응, 502 | Enter로 진행 |
 | `demo/bug.sh <이름>` | 코드에 버그를 넣으면 테스트가 잡고, 되돌리면 다시 통과 | 버그당 10~20초 |
@@ -15,11 +16,16 @@
 ### 1. 브라우저로 동작 확인
 
 ```sh
-./build/tiny 8000 --root tests/fixtures/www
+./demo/web.sh
 ```
 
-- `http://localhost:8000/home.html`: 정적 페이지와 이미지
-- `http://localhost:8000/nope.html`: 404 페이지
+브라우저에서 `http://localhost:8000/`을 엽니다. 페이지 파일은 `demo/www/`에 있습니다.
+
+- CSS가 적용되고 JS가 실행되는지 (MIME 타입이 맞아야 동작), 이미지 2개
+- CGI 덧셈: GET 링크와 POST 폼
+- `/nope.html` 링크: 404 페이지
+
+다 보면 Ctrl+C로 끕니다. 켜 둔 채로 `lb.sh`를 실행하면 포트 8000이 겹칩니다.
 
 브라우저는 캐시와 추가 요청이 있어서, 응답 하나하나를 보여줄 때는 아래처럼 터미널을 씁니다.
 

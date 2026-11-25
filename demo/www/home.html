@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>Tiny 웹 서버 데모</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Tiny 웹 서버 데모</h1>
+<p class="sub">이 페이지는 우리 팀이 만든 C 웹 서버가 <code>demo/www/</code>에서 보내고 있습니다.</p>
+
+<section>
+<h2>1. 정적 파일 (HTML, CSS, JS, 이미지)</h2>
+<p>이 글꼴과 테두리는 <code>style.css</code>가 <code>text/css</code>로 와야 보입니다.</p>
+<p id="js">app.js가 실행되지 않았습니다</p>
+<img src="godzilla.gif" alt="godzilla.gif">
+<img src="godzilla.jpg" alt="godzilla.jpg" height="100">
+</section>
+
+<section>
+<h2>2. CGI (동적 콘텐츠)</h2>
+<p>GET: <a href="/cgi-bin/adder?15&amp;27">/cgi-bin/adder?15&amp;27</a></p>
+<form action="/cgi-bin/adder" method="post">
+POST: <input name="a" value="100"> + <input name="b" value="23">
+<button type="submit">더하기</button>
+</form>
+</section>
+
+<section>
+<h2>3. 오류 페이지</h2>
+<p><a href="/nope.html">/nope.html</a> → 404 Not Found</p>
+<p>나머지 오류(400, 403, 413, 500, 502, 504)는 터미널에서
+<code>python3 demo/errors.py</code>로 보여줍니다.</p>
+</section>
+<script src="app.js"></script>
+</body>
+</html>

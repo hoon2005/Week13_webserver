@@ -1,0 +1,9 @@
+body { font-family: -apple-system, "Apple SD Gothic Neo", sans-serif; max-width: 720px;
+       margin: 40px auto; padding: 0 20px; color: #222; line-height: 1.6; }
+h1 { margin-bottom: 4px; }
+.sub { color: #666; margin-top: 0; }
+section { border: 1px solid #ddd; border-radius: 8px; padding: 12px 20px; margin: 16px 0; }
+h2 { font-size: 1.1em; margin: 4px 0 8px; }
+code { background: #f3f3f3; padding: 1px 5px; border-radius: 4px; }
+input { width: 60px; }
+#js { color: #0a7d32; font-weight: bold; }

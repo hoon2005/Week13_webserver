@@ -4,7 +4,7 @@
 #   백엔드 A  127.0.0.1:8001  (demo/lb/www_a)
 #   백엔드 B  127.0.0.1:8002  (demo/lb/www_b)
 #   프록시    127.0.0.1:8000  /api로 시작하는 요청은 A, B로 번갈아 넘기고
-#                             나머지는 직접 처리 (tests/fixtures/www + adder)
+#                             나머지는 직접 처리 (demo/www)
 #
 #   ./demo/lb.sh          단계마다 Enter를 누르면 다음으로 (발표용)
 #   ./demo/lb.sh --auto   멈추지 않고 끝까지 (리허설용)
@@ -22,10 +22,9 @@ BOLD=$(printf '\033[1m'); RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m'); 
 
 make -s all >/dev/null || { echo "빌드 실패"; exit 1; }
 
-# 프록시가 직접 서비스할 폴더: 테스트 픽스처 + adder CGI
+# 프록시가 직접 서비스할 폴더는 demo/www (web.sh와 같은 페이지). WORK에는 로그만
 WORK=$(mktemp -d)
-cp -R tests/fixtures/www "$WORK/www"
-cp build/adder "$WORK/www/cgi-bin/adder"
+cp build/adder demo/www/cgi-bin/adder
 
 PID_A=; PID_B=; PID_P=
 cleanup() {
@@ -86,13 +85,13 @@ PID_A=$!
 PID_B=$!
 wait_port $PA
 wait_port $PB
-./build/tiny $P --root "$WORK/www" --route /api=127.0.0.1:$PA,127.0.0.1:$PB >"$WORK/p.log" 2>&1 &
+./build/tiny $P --root demo/www --route /api=127.0.0.1:$PA,127.0.0.1:$PB >"$WORK/p.log" 2>&1 &
 PID_P=$!
 wait_port $P
 echo "  백엔드 A  127.0.0.1:$PA"
 echo "  백엔드 B  127.0.0.1:$PB"
 echo "  프록시    127.0.0.1:$P   (--route /api=127.0.0.1:$PA,127.0.0.1:$PB)"
-echo "  브라우저: http://127.0.0.1:$P/home.html (프록시가 직접 처리)"
+echo "  브라우저: http://127.0.0.1:$P/ (프록시가 직접 처리)"
 
 pause "1. 프록시에 /api/whoami.txt를 6번 요청 → A, B가 번갈아 응답"
 hit 6
