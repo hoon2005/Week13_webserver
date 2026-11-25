@@ -233,6 +233,53 @@ static void test_bad_header_lines(void)
     free(req);
 }
 
+/* M7-1, M7-2: 프록시와 백엔드가 다르게 해석할 수 있는 요청 (m6m7.md 3장) */
+static void test_request_validation(void)
+{
+    struct http_request *req = new_request();
+
+    /* 메서드: 토큰이 아니면 400, 형식은 맞지만 모르면 501 */
+    TEST_CHECK(parse_line(req, "G@T / HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "GE(T / HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "M-SEARCH_X / HTTP/1.1\r\n") == 501);
+    TEST_CHECK(parse_line(req, "VERYLONGMETHODNAME / HTTP/1.1\r\n") == 501);
+    TEST_CHECK(parse_line(req, "DELETE /api/users/3 HTTP/1.1\r\n") == 501);
+
+    /* URI는 '/'로 시작해야 함 */
+    TEST_CHECK(parse_line(req, "GET ./secret HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "GET http://example.com/ HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "GET * HTTP/1.1\r\n") == 400);
+
+    /* 요청 줄의 제어 문자 (탭은 허용: 구분자) */
+    TEST_CHECK(http_parse_request_line(req, "GET /a\0b HTTP/1.1\r\n", 19,
+                                       HTTP_LINE_MAX) == 400);
+    TEST_CHECK(parse_line(req, "GET /a\rb HTTP/1.1\r\n") == 400);
+    TEST_CHECK(parse_line(req, "GET\t/\tHTTP/1.1\r\n") == 0);
+
+    /* 헤더 이름은 토큰. ':' 앞 공백, 줄 앞 공백(obs-fold) 거절 */
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n",
+                             "Host: a\r\nConnection : close\r\n") == 400);
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n",
+                             "Host: a\r\n folded: x\r\n") == 400);
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n",
+                             "Host: a\r\nX(y): 1\r\n") == 400);
+    /* 헤더 줄의 제어 문자 */
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n",
+                             "Host: a\r\nX-A: 1\rX-B: 2\r\n") == 400);
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "GET / HTTP/1.1\r\n") == 0);
+    TEST_CHECK(
+        http_parse_header_line(req, "X-A: a\0b\r\n", 10, HTTP_LINE_MAX) == 400);
+    /* 값 안의 탭은 허용 */
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n",
+                             "Host: a\r\nX-A: a\tb\r\n") == 0);
+
+    TEST_CHECK(http_is_token("Content-Type", 12));
+    TEST_CHECK(!http_is_token("", 0));
+    TEST_CHECK(!http_is_token("a b", 3));
+    free(req);
+}
+
 static void test_mime(void)
 {
     TEST_CHECK(strcmp(http_mime_type("./home.html"), "text/html") == 0);
@@ -254,5 +301,6 @@ TEST_LIST = {
     {"expect", test_expect},
     {"unknown_header_kept_in_raw_block", test_unknown_header_kept_in_raw_block},
     {"bad_header_lines", test_bad_header_lines},
+    {"request_validation", test_request_validation},
     {"mime", test_mime},
     {NULL, NULL}};

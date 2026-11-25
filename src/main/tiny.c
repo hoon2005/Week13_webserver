@@ -1,19 +1,22 @@
 /*
- * tiny.c - 정적 파일과 CGI를 처리하는 웹 서버입니다.
+ * tiny.c - 정적 파일과 CGI를 처리하고, 규칙에 걸린 요청은 백엔드로 중계하는
+ *          웹 서버입니다.
  *   Phase 1: CS:APP Tiny의 각 부분을 같은 동작의 우리 코드로 교체 (M1~M3)
- *   Phase 2: docs/prd/final.md의 M4 동시성, M5 HTTP 완성
- *     M4 스레드 풀(작업 큐는 src/conn_queue.c), 소켓 타임아웃, fd 상속 차단
- *     M5 요청 파서(src/http.c), 본문, Expect, CGI 구조 변경, keep-alive
+ *   Phase 2: docs/prd/m4m5.md의 M4 동시성, M5 HTTP 완성
+ *            docs/prd/m6m7.md의 M6 Reverse Proxy(src/proxy.c), M7 안정성
  *
  * 사용법:
  *   ./build/tiny <port> [--root DIR] [--threads N] [--queue N]
  *                       [--timeout 초] [--keepalive-max N]
+ *                       [--route 접두사=이름:포트,이름:포트]... [--proxy-timeout 초]
  *
- * 요청 하나의 흐름 (final.md 7장)
- *   [main]   accept → FD_CLOEXEC, 타임아웃 설정 → 작업 큐에 넣기
- *   [작업자] 큐에서 꺼내기 → rio 준비(연결당 한 번) → 요청 반복 처리 → close
- *   요청 하나: 요청 줄 → 헤더 → 헤더 검사 → (Expect) → 본문 → 경로 확인
- *             → 정적 파일 / CGI → 응답 → keep-alive 판단
+ * 요청 하나의 흐름 (m6m7.md 4장)
+ *   [main]   poll(리스닝 소켓, 종료 파이프) → accept → 작업 큐에 넣기
+ *   [작업자] 큐에서 꺼내기 → 요청 반복 처리 → close
+ *   요청 하나: 요청 줄·헤더(마감 10초) → 요청 검사 → (Expect) → 본문(마감 30초)
+ *             → 경로 검사(403) → 라우팅 → 백엔드 중계 / 정적 파일 / CGI
+ *             → keep-alive 판단
+ *   [시그널 스레드] SIGINT·SIGTERM → 종료 파이프 → 큐 종료. 두 번째 신호는 즉시 종료
  */
 #if defined(__linux__)
 /* syscall(SYS_close_range)용. _GNU_SOURCE는 csapp.h의 gai_error와 충돌해서 쓰지 않음 */
@@ -23,8 +26,10 @@
 #include "csapp.h"
 #include "conn_queue.h"
 #include "http.h"
+#include "proxy.h"
 
 #include <poll.h>
+#include <stdatomic.h>
 #include <strings.h>
 #include <time.h>
 #if defined(__linux__)
@@ -33,20 +38,24 @@
 int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
 #endif
 
-#define CGI_TIMEOUT_SEC 10      /* CGI 실행 시간 제한 (final.md 2.4) */
-#define CGI_OUT_MAX (1L << 20)  /* CGI 출력 상한 1 MiB (final.md 4.4) */
+#define CGI_TIMEOUT_SEC 10     /* CGI 실행 시간 제한 (m4m5.md 2.4) */
+#define CGI_OUT_MAX (1L << 20) /* CGI 출력 상한 1 MiB (m4m5.md 4.4) */
+#define HEADER_DEADLINE_MULT 2 /* 요청 줄·헤더 마감 = --timeout의 2배 (M7-4) */
+#define BODY_DEADLINE_MULT 6   /* 본문 마감 = --timeout의 6배 (M7-4) */
 
-/* ============================== 설정 ============================== */
+/* ============================== 설정과 공유 상태 ============================== */
 
 /* 실행 인자로 정하는 값. main이 작업자를 만들기 전에 채우고 이후에는 읽기만 함 */
 struct server_config {
     const char *port;
-    const char *root;  /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
-    int threads;       /* 작업자 수 */
-    int queue;         /* 작업 큐 크기 */
-    int timeout;       /* 읽기 타임아웃(초). 쓰기는 2배 */
-    int keepalive_max; /* 연결당 요청 수 상한 */
-    long open_max;     /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
+    int port_num;
+    const char *root;    /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
+    int threads;         /* 작업자 수 */
+    int queue;           /* 작업 큐 크기 */
+    int timeout;         /* 읽기 타임아웃(초). 쓰기는 2배 */
+    int keepalive_max;   /* 연결당 요청 수 상한 */
+    int proxy_timeout;   /* 백엔드 응답 헤더까지 합계, 본문 데이터 간격(초) */
+    long open_max;       /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
     char path_env[1024]; /* CGI에 넘길 PATH=... */
 };
 
@@ -57,13 +66,30 @@ static struct server_config cfg = {
     .queue = 64,
     .timeout = 5,
     .keepalive_max = 100,
+    .proxy_timeout = 10,
 };
+
+/* 라우팅 규칙. 시작할 때 채우고 이후에는 Round-Robin 순번(atomic)만 바뀜 */
+static struct proxy_table routes;
+
+/*
+ * 종료 처리 (M7-5, M7-6)
+ *   stopping: 첫 종료 신호를 받으면 1. 응답 헤더를 쓸 때 보고 Connection: close
+ *   cleanup_done: main이 작업자를 모두 join하면 1. 시그널 스레드를 깨울 때 씀
+ *   wake_pipe: 종료 알림. 1바이트를 쓰고 읽지 않아서 기다리는 모두가 같은 알림을 봄
+ */
+static atomic_int stopping;
+static atomic_int cleanup_done;
+static int wake_pipe[2] = {-1, -1};
+static sigset_t stop_signals; /* SIGINT, SIGTERM */
 
 static void usage(const char *prog)
 {
     fprintf(stderr,
             "usage: %s <port> [--root DIR] [--threads N] [--queue N] "
-            "[--timeout 초] [--keepalive-max N]\n",
+            "[--timeout 초] [--keepalive-max N]\n"
+            "       [--route 접두사=이름:포트[,이름:포트...]]... "
+            "[--proxy-timeout 초]\n",
             prog);
     exit(1);
 }
@@ -82,10 +108,17 @@ static int positive_int_arg(const char *prog, const char *s)
 
 static void config_parse(int argc, char **argv)
 {
+    char err[512];
+
     if (argc < 2 || strncmp(argv[1], "--", 2) == 0) {
         usage(argv[0]);
     }
     cfg.port = argv[1]; /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
+    cfg.port_num = positive_int_arg(argv[0], argv[1]);
+    if (cfg.port_num > 65535) {
+        usage(argv[0]);
+    }
+    proxy_table_init(&routes);
     for (int i = 2; i < argc; i += 2) {
         if (i + 1 >= argc) {
             usage(argv[0]);
@@ -100,27 +133,40 @@ static void config_parse(int argc, char **argv)
             cfg.timeout = positive_int_arg(argv[0], argv[i + 1]);
         } else if (strcmp(argv[i], "--keepalive-max") == 0) {
             cfg.keepalive_max = positive_int_arg(argv[0], argv[i + 1]);
+        } else if (strcmp(argv[i], "--proxy-timeout") == 0) {
+            cfg.proxy_timeout = positive_int_arg(argv[0], argv[i + 1]);
+        } else if (strcmp(argv[i], "--route") == 0) {
+            /* 잘못된 규칙은 실행 중이 아니라 시작할 때 거절 (M6-4) */
+            if (proxy_route_add(&routes, argv[i + 1], cfg.port_num, err,
+                                sizeof(err)) < 0) {
+                fprintf(stderr, "--route %s: %s\n", argv[i + 1], err);
+                exit(1);
+            }
         } else {
             usage(argv[0]);
         }
     }
 }
 
-/* ============================== M1 + M4: 소켓과 스레드 풀 ============================== */
+/* ============================== M1 + M4 + M7: 소켓, 스레드, 종료 ============================== */
 
 static int listen_socket_open(const char *port);
+static void accept_loop(int listenfd, struct conn_queue *queue);
 static int accept_cloexec(int listenfd);
-static void socket_timeouts_set(int connfd);
+static void conn_socket_setup(int connfd);
 static void *worker_main(void *arg);
+static void *signal_main(void *arg);
 static int serve_connection(int connfd);
-static void connection_close_lingering(int connfd);
+static void connection_close(int connfd, int next);
+static long now_ms(void);
 
 int main(int argc, char **argv)
 {
     struct conn_queue queue;
     pthread_t *workers;
+    pthread_t signal_thread;
     const char *path;
-    int listenfd;
+    int listenfd, rc;
 
     config_parse(argc, argv);
 
@@ -139,7 +185,7 @@ int main(int argc, char **argv)
     /* 로그가 파일로 갈 때도 한 줄씩 바로 나가게 함 */
     setvbuf(stdout, NULL, _IOLBF, 0);
 
-    /* CGI 자식은 fork 뒤 async-signal-safe 함수만 써야 하므로 미리 계산 (final.md 2.6) */
+    /* CGI 자식은 fork 뒤 async-signal-safe 함수만 써야 하므로 미리 계산 (m4m5.md 2.6) */
     cfg.open_max = sysconf(_SC_OPEN_MAX);
     if (cfg.open_max <= 0 || cfg.open_max > 65536) {
         cfg.open_max = 65536;
@@ -147,6 +193,24 @@ int main(int argc, char **argv)
     path = getenv("PATH");
     snprintf(cfg.path_env, sizeof(cfg.path_env), "PATH=%s",
              path ? path : "/usr/bin:/bin");
+
+    /* 다른 스레드를 만들기 전에 막음. 새 스레드는 이 설정을 물려받고,
+     * 시그널은 시그널 스레드의 sigwait로만 받음 (M7-5) */
+    sigemptyset(&stop_signals);
+    sigaddset(&stop_signals, SIGINT);
+    sigaddset(&stop_signals, SIGTERM);
+    rc = pthread_sigmask(SIG_BLOCK, &stop_signals, NULL);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_sigmask: %s\n", strerror(rc));
+        exit(1);
+    }
+
+    if (pipe(wake_pipe) < 0) {
+        perror("pipe");
+        exit(1);
+    }
+    fcntl(wake_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(wake_pipe[1], F_SETFD, FD_CLOEXEC);
 
     listenfd = listen_socket_open(cfg.port);
     if (listenfd < 0) {
@@ -163,54 +227,137 @@ int main(int argc, char **argv)
         exit(1);
     }
     for (int i = 0; i < cfg.threads; i++) {
-        int rc = pthread_create(&workers[i], NULL, worker_main, &queue);
+        rc = pthread_create(&workers[i], NULL, worker_main, &queue);
         if (rc != 0) {
             fprintf(stderr, "pthread_create: %s\n", strerror(rc));
             exit(1);
         }
     }
+    rc = pthread_create(&signal_thread, NULL, signal_main, &queue);
+    if (rc != 0) {
+        fprintf(stderr, "pthread_create: %s\n", strerror(rc));
+        exit(1);
+    }
 
-    /* main은 accept만 함. 큐가 가득 차면 conn_queue_push 안에서 기다림 (503 없음) */
+    /* 종료 알림이 올 때까지 accept (M7-6) */
+    accept_loop(listenfd, &queue);
+
+    /* 정리: 새 연결을 받지 않음 → 작업자가 큐에 남은 연결까지 처리하고 끝남 */
+    close(listenfd);
+    for (int i = 0; i < cfg.threads; i++) {
+        pthread_join(workers[i], NULL);
+    }
+    /* 시그널 스레드는 두 번째 신호를 기다리는 중. 정리 완료를 알리고 깨워 join */
+    atomic_store(&cleanup_done, 1);
+    pthread_kill(signal_thread, SIGTERM);
+    pthread_join(signal_thread, NULL);
+
+    conn_queue_destroy(&queue);
+    free(workers);
+    close(wake_pipe[0]);
+    close(wake_pipe[1]);
+    printf("종료 완료\n");
+    return 0;
+}
+
+/*
+ * main: 리스닝 소켓과 종료 파이프를 함께 poll로 기다림 (M7-6).
+ *   둘이 함께 준비되면 알림을 먼저 보고 accept하지 않음 (큐에 넣을 수 없는 연결)
+ *   큐가 가득 차면 conn_queue_push 안에서 기다림 (503 없음). 종료가 시작되면
+ *   conn_queue_shutdown이 깨우고, 넣지 못한 연결은 닫음.
+ */
+static void accept_loop(int listenfd, struct conn_queue *queue)
+{
     while (1) {
-        int connfd = accept_cloexec(listenfd);
-        if (connfd < 0) {
-            if (errno != EINTR && errno != ECONNABORTED) {
-                perror("accept");
-            }
-            if (errno == EMFILE || errno == ENFILE) {
-                /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
-                struct timespec ts = {0, 10 * 1000 * 1000};
-                nanosleep(&ts, NULL);
+        struct pollfd p[2] = {{wake_pipe[0], POLLIN, 0},
+                              {listenfd, POLLIN, 0}};
+        int connfd;
+
+        if (poll(p, 2, -1) < 0) {
+            if (errno != EINTR) {
+                perror("poll");
             }
             continue;
         }
-        socket_timeouts_set(connfd);
-        if (conn_queue_push(&queue, connfd) < 0) {
-            close(connfd); /* 종료 중 (M7) */
+        if (p[0].revents != 0) {
+            return; /* 종료 알림 */
+        }
+        if (p[1].revents == 0) {
+            continue;
+        }
+        connfd = accept_cloexec(listenfd);
+        if (connfd < 0) {
+            /* 논블로킹이라 poll과 accept 사이에 클라이언트가 끊어도 멈추지 않음 */
+            if (errno == EMFILE || errno == ENFILE) {
+                perror("accept");
+                struct timespec ts = {0, 10 * 1000 * 1000};
+                nanosleep(&ts, NULL); /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK &&
+                       errno != EINTR && errno != ECONNABORTED) {
+                perror("accept");
+            }
+            continue;
+        }
+        conn_socket_setup(connfd);
+        if (conn_queue_push(queue, connfd) < 0) {
+            close(connfd); /* 종료가 시작됨: fd를 남기지 않음 */
         }
     }
-    /* 종료 처리(sigwait 스레드, pthread_join)는 M7에서 추가 */
 }
 
 /* 작업자: 큐에서 연결을 꺼내 끝날 때까지 처리 → 닫기 → 반복.
- * 락은 큐를 만질 때만 잡고, 요청 처리는 락 밖에서 함 */
+ * 락은 큐를 만질 때만 잡고, 요청 처리는 락 밖에서 함.
+ * 종료 뒤에도 큐에 남은 연결은 다 꺼내서 처리함 (M7-7) */
 static void *worker_main(void *arg)
 {
     struct conn_queue *queue = arg;
     int connfd;
 
     while ((connfd = conn_queue_pop(queue)) >= 0) {
-        if (serve_connection(connfd)) {
-            connection_close_lingering(connfd); /* 응답을 보내고 닫는 경우 */
-        }
-        close(connfd);
+        connection_close(connfd, serve_connection(connfd));
     }
     return NULL;
 }
 
 /*
+ * 시그널 스레드 (M7-5, M7-8)
+ *   첫 SIGINT·SIGTERM: 종료 플래그 → 종료 파이프에 1바이트 → 큐 종료. 알리기만 함
+ *   두 번째: 종류와 상관없이 즉시 종료 (_exit)
+ *   main이 정리를 마치고 깨운 것은 두 번째 신호로 세지 않음
+ */
+static void *signal_main(void *arg)
+{
+    struct conn_queue *queue = arg;
+    int sig;
+
+    while (sigwait(&stop_signals, &sig) != 0) {
+    }
+    atomic_store(&stopping, 1);
+    while (write(wake_pipe[1], "x", 1) < 0 && errno == EINTR) {
+    }
+    conn_queue_shutdown(queue);
+    printf("종료 시작 (%s): 새 연결을 받지 않고 처리 중인 요청을 마칩니다\n",
+           sig == SIGINT ? "SIGINT" : "SIGTERM");
+
+    while (1) {
+        if (sigwait(&stop_signals, &sig) != 0) {
+            continue;
+        }
+        if (atomic_load(&cleanup_done)) {
+            return NULL;
+        }
+        static const char msg[] = "두 번째 종료 신호: 즉시 종료합니다\n";
+        if (write(STDOUT_FILENO, msg, sizeof(msg) - 1) < 0) {
+            /* 로그를 못 써도 종료함 */
+        }
+        _exit(1);
+    }
+}
+
+/*
  * socket → setsockopt(SO_REUSEADDR) → bind → listen.
- * 리스닝 소켓에 FD_CLOEXEC를 걸어 CGI가 물려받지 않게 함 (final.md 2.6).
+ * 리스닝 소켓에 FD_CLOEXEC를 걸어 CGI가 물려받지 않게 함 (m4m5.md 2.6).
+ * 논블로킹: poll이 깨운 뒤 클라이언트가 끊어도 accept에서 멈추지 않음 (M7-6).
  * 작업자를 만들기 전에 부르므로 socket과 fcntl 사이에 fork하는 스레드가 없음.
  */
 static int listen_socket_open(const char *port)
@@ -224,7 +371,8 @@ static int listen_socket_open(const char *port)
         perror("socket");
         return -1;
     }
-    if (fcntl(listenfd, F_SETFD, FD_CLOEXEC) < 0) {
+    if (fcntl(listenfd, F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(listenfd, F_SETFL, fcntl(listenfd, F_GETFL) | O_NONBLOCK) < 0) {
         perror("fcntl");
         close(listenfd);
         return -1;
@@ -253,7 +401,7 @@ static int listen_socket_open(const char *port)
 }
 
 /*
- * accept하면서 접속 소켓에 FD_CLOEXEC를 겁니다 (final.md 2.6 첫 겹).
+ * accept하면서 접속 소켓에 FD_CLOEXEC를 겁니다 (m4m5.md 2.6 첫 겹).
  *   Linux: accept4(SOCK_CLOEXEC)로 원자적으로 설정
  *   macOS: accept 후 fcntl. 그 사이에 다른 작업자가 fork하는 틈은
  *          CGI 자식이 fd 3 이상을 모두 닫아서 막음 (두 번째 겹)
@@ -272,18 +420,146 @@ static int accept_cloexec(int listenfd)
 }
 
 /*
- * 읽기 타임아웃(--timeout초)과 쓰기 타임아웃(2배)을 겁니다 (final.md 2.4).
- *   접속만 하고 보내지 않는 손님, keep-alive로 쉬는 연결, 응답을 받아 가지 않는
- *   손님이 작업자를 붙잡지 못하게 합니다. 시간이 지나면 read/write가 -1을
- *   돌려주고 rio 함수도 -1을 돌려주므로 요청이 응답 없이 끝납니다.
+ * 접속 소켓 준비
+ *   블로킹으로 되돌림: macOS는 리스닝 소켓의 논블로킹 설정을 물려줌 (M7-6)
+ *   쓰기 타임아웃(--timeout의 2배): 응답을 받아 가지 않는 손님 (m4m5.md 2.4)
+ *   읽기는 poll로 마감을 지키므로 SO_RCVTIMEO를 쓰지 않음 (M7-4)
  */
-static void socket_timeouts_set(int connfd)
+static void conn_socket_setup(int connfd)
 {
-    struct timeval rcv = {cfg.timeout, 0};
     struct timeval snd = {cfg.timeout * 2, 0};
+    int flags = fcntl(connfd, F_GETFL);
 
-    setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv));
+    if (flags >= 0 && (flags & O_NONBLOCK)) {
+        fcntl(connfd, F_SETFL, flags & ~O_NONBLOCK);
+    }
     setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+}
+
+/* ============================== M7-4: 요청 수신 마감 ============================== */
+
+/*
+ * 연결당 하나의 읽기 버퍼 (rio를 대신함).
+ *   rio는 read 앞에서 기다리는 방법을 바꿀 수 없어서, 읽기마다 poll로
+ *   "마감까지 남은 시간"과 "읽기 타임아웃" 중 짧은 쪽만큼만 기다리게 직접 만듦.
+ *   파이프라이닝으로 다음 요청이 이미 버퍼에 있으면 소켓을 기다리지 않음.
+ */
+struct conn_reader {
+    int fd;
+    size_t cnt; /* 버퍼에 남은 바이트 */
+    char *ptr;  /* 다음에 읽을 위치 */
+    char buf[8192];
+};
+
+enum read_result { READ_EOF = 0, READ_OK = 1, READ_FAIL = -1, READ_STOP = -2 };
+
+static void reader_init(struct conn_reader *r, int fd)
+{
+    r->fd = fd;
+    r->cnt = 0;
+    r->ptr = r->buf;
+}
+
+/*
+ * 버퍼가 비었을 때 소켓에서 채움.
+ *   기다리는 시간: min(마감까지 남은 시간, 읽기 타임아웃). 지나면 READ_FAIL
+ *   watch_wake: 종료 파이프도 함께 봄. 소켓과 알림이 함께 준비되면 소켓 먼저
+ */
+static int reader_fill(struct conn_reader *r, long deadline, int watch_wake)
+{
+    while (1) {
+        struct pollfd p[2] = {{r->fd, POLLIN, 0}, {wake_pipe[0], POLLIN, 0}};
+        long left = deadline - now_ms();
+        long wait = (long)cfg.timeout * 1000;
+        ssize_t n;
+        int rc;
+
+        if (left <= 0) {
+            return READ_FAIL; /* 전체 마감: 바이트가 와도 연장하지 않음 */
+        }
+        rc = poll(p, watch_wake ? 2 : 1, (int)(left < wait ? left : wait));
+        if (rc < 0 && errno == EINTR) {
+            continue;
+        }
+        if (rc <= 0) {
+            return READ_FAIL; /* 오류, 새 바이트가 오지 않음 */
+        }
+        if (p[0].revents == 0) {
+            return READ_STOP; /* 종료 알림만 옴 */
+        }
+        n = read(r->fd, r->buf, sizeof(r->buf));
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n < 0) {
+            return READ_FAIL;
+        }
+        if (n == 0) {
+            return READ_EOF;
+        }
+        r->cnt = (size_t)n;
+        r->ptr = r->buf;
+        return READ_OK;
+    }
+}
+
+/* 요청의 첫 바이트를 기다림 (keep-alive의 다음 요청 포함): --timeout초 */
+static int reader_wait_first(struct conn_reader *r, int watch_wake)
+{
+    if (r->cnt > 0) {
+        return READ_OK;
+    }
+    return reader_fill(r, now_ms() + (long)cfg.timeout * 1000, watch_wake);
+}
+
+/*
+ * 한 줄 읽기 (rio_readlineb와 같은 규칙): '\n'까지 최대 maxlen - 1바이트.
+ * 반환: 읽은 바이트 수, 0(바로 EOF), -1(마감, 오류)
+ */
+static ssize_t reader_readline(struct conn_reader *r, char *usrbuf,
+                               size_t maxlen, long deadline)
+{
+    size_t n = 0;
+
+    while (n + 1 < maxlen) {
+        if (r->cnt == 0) {
+            int rc = reader_fill(r, deadline, 0);
+            if (rc == READ_EOF) {
+                break;
+            }
+            if (rc != READ_OK) {
+                return -1;
+            }
+        }
+        char c = *r->ptr++;
+        r->cnt--;
+        usrbuf[n++] = c;
+        if (c == '\n') {
+            break;
+        }
+    }
+    usrbuf[n] = '\0';
+    return (ssize_t)n;
+}
+
+/* 정확히 len바이트 읽기. 반환: len, 그보다 적으면 끊김이나 마감 */
+static ssize_t reader_readn(struct conn_reader *r, char *usrbuf, size_t len,
+                            long deadline)
+{
+    size_t n = 0;
+
+    while (n < len) {
+        size_t chunk;
+        if (r->cnt == 0 && reader_fill(r, deadline, 0) != READ_OK) {
+            break;
+        }
+        chunk = r->cnt < len - n ? r->cnt : len - n;
+        memcpy(usrbuf + n, r->ptr, chunk);
+        r->ptr += chunk;
+        r->cnt -= chunk;
+        n += chunk;
+    }
+    return (ssize_t)n;
 }
 
 /* ============================== 응답 쓰기 ============================== */
@@ -294,19 +570,23 @@ static int write_all(int fd, const void *buf, size_t n)
 }
 
 /*
- * 응답 헤더를 씁니다 (final.md 0장 "응답 형식").
+ * 응답 헤더를 씁니다 (m4m5.md 0장 "응답 형식").
  *   상태 줄 HTTP/1.1, 모든 응답에 Content-Length와 Connection.
  *   content_type이 NULL이면 Content-Type 줄을 쓰지 않음 (CGI는 extra에 들어 있음).
  *   extra: "이름: 값\r\n" 형식의 추가 헤더 (없으면 NULL)
+ *   종료가 시작됐으면 Connection: close로 보내고 *keep을 0으로 (M7-7)
  */
 static int response_head_send(int fd, int status, const char *reason,
                               const char *content_type, const char *extra,
-                              size_t length, int keep)
+                              size_t length, int *keep)
 {
     char header[MAXBUF * 2];
     char type_line[HTTP_FIELD_MAX + 32] = "";
     int n;
 
+    if (atomic_load(&stopping)) {
+        *keep = 0;
+    }
     if (content_type != NULL) {
         snprintf(type_line, sizeof(type_line), "Content-Type: %s\r\n",
                  content_type);
@@ -318,20 +598,23 @@ static int response_head_send(int fd, int status, const char *reason,
                  "Content-Length: %zu\r\n"
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
-                 extra ? extra : "", length, keep ? "keep-alive" : "close");
-    if (n < 0 || n >= (int)sizeof(header)) {
+                 extra ? extra : "", length, *keep ? "keep-alive" : "close");
+    if (n < 0 || n >= (int)sizeof(header) ||
+        write_all(fd, header, (size_t)n) < 0) {
+        *keep = 0;
         return -1;
     }
-    return write_all(fd, header, (size_t)n);
+    return 0;
 }
 
 /*
  * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
  * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 0으로.
- * 보낸 상태 코드를 돌려줌 (로그용).
+ * extra: 추가 헤더 (405의 Allow 등, 없으면 NULL). 보낸 상태 코드를 돌려줌.
  */
-static int error_reply(int fd, const struct http_request *req, int status,
-                       const char *cause, const char *longmsg, int *keep)
+static int error_reply_extra(int fd, const struct http_request *req,
+                             int status, const char *extra, const char *cause,
+                             const char *longmsg, int *keep)
 {
     char body[MAXBUF];
     int body_len;
@@ -347,54 +630,92 @@ static int error_reply(int fd, const struct http_request *req, int status,
     if (body_len >= (int)sizeof(body)) {
         body_len = sizeof(body) - 1;
     }
-    if (response_head_send(fd, status, NULL, "text/html", NULL,
-                           (size_t)body_len, *keep) < 0 ||
+    if (response_head_send(fd, status, NULL, "text/html", extra,
+                           (size_t)body_len, keep) < 0 ||
         (send_body && write_all(fd, body, (size_t)body_len) < 0)) {
         *keep = 0;
     }
     return status;
 }
 
-/* 요청마다 한 줄 로그. printf 한 번이라 스레드끼리 한 줄 안에서는 섞이지 않음 */
-static void request_log(const struct http_request *req, int status)
+static int error_reply(int fd, const struct http_request *req, int status,
+                       const char *cause, const char *longmsg, int *keep)
 {
-    printf("%s %s %s %d\n", req->method[0] ? req->method : "-",
-           req->uri[0] ? req->uri : "-",
-           req->version[0] ? req->version : "-", status);
+    return error_reply_extra(fd, req, status, NULL, cause, longmsg, keep);
+}
+
+/* 요청마다 한 줄 로그. printf 한 번이라 스레드끼리 한 줄 안에서는 섞이지 않음.
+ * 프록시 요청이면 보낸 백엔드를 붙임 (Round-Robin 확인용) */
+static void request_log(const struct http_request *req, int status,
+                        const char *backend)
+{
+    printf("%s %s %s %d%s%s\n", req->method[0] ? req->method : "-",
+           req->uri[0] ? req->uri : "-", req->version[0] ? req->version : "-",
+           status, backend ? " -> " : "", backend ? backend : "");
 }
 
 /* ============================== M5: 연결과 요청 처리 ============================== */
 
 /* request_handle의 결과: 연결을 어떻게 할지 */
 enum conn_next {
-    CONN_CLOSE_SILENT = 0, /* 응답 없이 닫음 (끊김, 타임아웃) */
-    CONN_KEEP = 1,         /* 다음 요청을 기다림 */
-    CONN_CLOSE_REPLIED = 2 /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
+    CONN_CLOSE_SILENT = 0,  /* 응답 없이 바로 닫음 (끊김, 마감, 본문 도중 실패) */
+    CONN_KEEP = 1,          /* 다음 요청을 기다림 */
+    CONN_CLOSE_REPLIED = 2, /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
+    CONN_CLOSE_RESET = 3    /* RST로 닫음: 길이 없는 프록시 응답이 잘림 (M6-13) */
 };
 
-static long now_ms(void);
-static int request_handle(int fd, rio_t *rio, int can_keep);
+static int request_handle(int fd, struct conn_reader *r, int can_keep,
+                          int watch_wake, const char *client_ip);
 static int request_route(int fd, struct http_request *req, int *keep);
+static int proxy_handle(int fd, struct http_request *req,
+                        struct proxy_route *route, const char *client_ip,
+                        int *keep);
+static int uri_path_is_clean(const char *uri);
 
 /*
- * 연결 하나를 처리합니다 (final.md 5.1).
- *   rio는 연결당 한 번만 준비함. 파이프라이닝으로 다음 요청 앞부분이 이미
- *   rio 버퍼에 들어와 있을 수 있어서, 요청마다 새로 만들면 그 데이터를 잃음.
+ * 연결 하나를 처리합니다 (m4m5.md 5.1).
+ *   읽기 버퍼는 연결당 한 번만 준비함. 파이프라이닝으로 다음 요청 앞부분이
+ *   이미 버퍼에 들어와 있을 수 있어서, 요청마다 새로 만들면 그 데이터를 잃음.
  *   이 연결의 요청 수가 --keepalive-max에 닿으면 그 응답에 Connection: close.
+ *   종료 알림은 두 번째 요청을 기다릴 때부터 봄: 큐에 있던 연결의 첫 요청은
+ *   처리함 (M7-6, M7-7)
  */
 static int serve_connection(int connfd)
 {
-    rio_t rio;
+    struct conn_reader r;
+    struct sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+    char client_ip[INET_ADDRSTRLEN] = "unknown";
     int next;
 
-    rio_readinitb(&rio, connfd);
+    /* 백엔드에 X-Forwarded-For로 알려 줄 클라이언트 IP (M6-10) */
+    if (getpeername(connfd, (SA *)&peer, &peer_len) == 0) {
+        inet_ntop(AF_INET, &peer.sin_addr, client_ip, sizeof(client_ip));
+    }
+    reader_init(&r, connfd);
     for (int n = 1;; n++) {
-        next = request_handle(connfd, &rio, n < cfg.keepalive_max);
+        next = request_handle(connfd, &r, n < cfg.keepalive_max, n > 1,
+                              client_ip);
         if (next != CONN_KEEP) {
             break;
         }
     }
-    return next == CONN_CLOSE_REPLIED; /* 1이면 닫기 전에 남은 데이터를 비움 */
+    return next;
+}
+
+static void connection_close_lingering(int connfd);
+
+/* serve_connection의 결과에 맞게 연결을 닫음 */
+static void connection_close(int connfd, int next)
+{
+    if (next == CONN_CLOSE_REPLIED) {
+        connection_close_lingering(connfd);
+    } else if (next == CONN_CLOSE_RESET) {
+        /* SO_LINGER 0초로 닫으면 FIN 대신 RST: 클라이언트가 잘린 응답을 알 수 있음 */
+        struct linger lg = {1, 0};
+        setsockopt(connfd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+    }
+    close(connfd);
 }
 
 /*
@@ -446,20 +767,32 @@ static void connection_close_lingering(int connfd)
 /*
  * 요청 하나를 읽고 응답합니다. 반환은 enum conn_next.
  * 한 줄 규칙: 요청을 끝까지 읽었고 응답 길이를 알면 유지, 아니면 닫음 (5.2)
+ *
+ * 수신 마감 (M7-4, --timeout이 5초일 때)
+ *   첫 바이트 5초, 새 바이트 간격 5초, 첫 바이트부터 헤더 끝까지 10초,
+ *   본문 전체 30초. 마감이 지나면 응답 없이 닫음.
  */
-static int request_handle(int fd, rio_t *rio, int can_keep)
+static int request_handle(int fd, struct conn_reader *r, int can_keep,
+                          int watch_wake, const char *client_ip)
 {
     struct http_request req;
     char line[MAXLINE];
+    struct proxy_route *route;
     ssize_t n;
-    long body_len;
+    long body_len, deadline;
     int status;
     int keep = 0;
 
     http_request_init(&req);
 
-    /* 1. 요청 줄. 0(클라이언트가 끊음)이나 -1(읽기 타임아웃)이면 조용히 닫음 */
-    n = rio_readlineb(rio, line, MAXLINE);
+    /* 0. 첫 바이트: 끊김, 타임아웃, 쉬는 중 종료 알림이면 조용히 닫음 (M7-6) */
+    if (reader_wait_first(r, watch_wake) != READ_OK) {
+        return CONN_CLOSE_SILENT;
+    }
+    deadline = now_ms() + (long)cfg.timeout * HEADER_DEADLINE_MULT * 1000;
+
+    /* 1. 요청 줄. 0(클라이언트가 끊음)이나 -1(마감)이면 조용히 닫음 */
+    n = reader_readline(r, line, MAXLINE, deadline);
     if (n <= 0) {
         return CONN_CLOSE_SILENT;
     }
@@ -467,15 +800,15 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     if (status != 0) { /* 414, 400, 505, 501: 본문 경계를 모르므로 닫음 */
         error_reply(fd, &req, status, "request line", "Bad request line",
                     &keep);
-        request_log(&req, status);
+        request_log(&req, status, NULL);
         return CONN_CLOSE_REPLIED;
     }
 
     /* 2. 헤더: 빈 줄까지 "이름: 값" → 구조체 + 원본 블록 */
     while (1) {
-        n = rio_readlineb(rio, line, MAXLINE);
+        n = reader_readline(r, line, MAXLINE, deadline);
         if (n <= 0) {
-            return CONN_CLOSE_SILENT; /* 헤더 도중 끊김, 타임아웃 */
+            return CONN_CLOSE_SILENT; /* 헤더 도중 끊김, 마감 */
         }
         status = http_parse_header_line(&req, line, (size_t)n, MAXLINE);
         if (status == 1) {
@@ -483,7 +816,7 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
         }
         if (status != 0) {
             error_reply(fd, &req, status, "header", "Bad header", &keep);
-            request_log(&req, status);
+            request_log(&req, status, NULL);
             return CONN_CLOSE_REPLIED;
         }
     }
@@ -492,7 +825,7 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
     status = http_finish_headers(&req);
     if (status != 0) {
         error_reply(fd, &req, status, req.uri, "Request rejected", &keep);
-        request_log(&req, status);
+        request_log(&req, status, NULL);
         return CONN_CLOSE_REPLIED;
     }
     keep = req.keep_alive && can_keep;
@@ -506,55 +839,130 @@ static int request_handle(int fd, rio_t *rio, int can_keep)
         }
     }
 
-    /* 5. 본문: 헤더를 읽은 같은 rio로 정확히 CL바이트 (GET에 붙어 와도 읽고 버림) */
+    /* 5. 본문: 정확히 CL바이트. 마감은 헤더 검사와 100 Continue 뒤부터 셈 */
     if (body_len > 0) {
+        deadline = now_ms() + (long)cfg.timeout * BODY_DEADLINE_MULT * 1000;
         req.body = malloc((size_t)body_len);
         if (req.body == NULL) {
             keep = 0;
             error_reply(fd, &req, 500, req.uri, "Out of memory", &keep);
-            request_log(&req, 500);
+            request_log(&req, 500, NULL);
             return CONN_CLOSE_REPLIED;
         }
-        n = rio_readnb(rio, req.body, (size_t)body_len);
-        if (n != (ssize_t)body_len) { /* 도중에 끊김, 타임아웃: 응답 없이 닫음 */
+        n = reader_readn(r, req.body, (size_t)body_len, deadline);
+        if (n != (ssize_t)body_len) { /* 도중에 끊김, 마감: 응답 없이 닫음 */
             http_request_free(&req);
             return CONN_CLOSE_SILENT;
         }
         req.body_len = (size_t)body_len;
     }
 
-    /* 6. 경로 확인 → 정적 파일 / CGI → 응답 */
+    /* 6. 경로 검사: 라우팅 전에 모든 요청에 같은 규칙 (M6-7) */
+    if (!uri_path_is_clean(req.uri)) {
+        status = error_reply(fd, &req, 403, req.uri,
+                             "Tiny doesn't serve this path", &keep);
+        request_log(&req, status, NULL);
+        http_request_free(&req);
+        return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+    }
+
+    /* 7. 라우팅: 규칙에 걸리면 백엔드로, 아니면 직접 처리 (M6-2, M6-6) */
+    route = routes.count > 0 ? proxy_route_find(&routes, req.uri) : NULL;
+    if (route != NULL) {
+        int next = proxy_handle(fd, &req, route, client_ip, &keep);
+        http_request_free(&req);
+        return next;
+    }
     status = request_route(fd, &req, &keep);
-    request_log(&req, status);
+    request_log(&req, status, NULL);
     http_request_free(&req);
     return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
 }
 
+/*
+ * 백엔드로 중계 (src/proxy.c). 결과를 연결 처리로 바꿈.
+ *   백엔드 실패(502, 504)는 요청을 끝까지 읽은 뒤의 오류라 연결 유지 (M6-16)
+ *   본문 도중 실패는 바로 닫거나 RST (M6-13)
+ */
+static int proxy_handle(int fd, struct http_request *req,
+                        struct proxy_route *route, const char *client_ip,
+                        int *keep)
+{
+    const char *backend = NULL;
+    int status = 0;
+    int rc = proxy_forward(fd, req, client_ip, route, cfg.proxy_timeout,
+                           &stopping, keep, &status, &backend);
+    int next;
+
+    switch (rc) {
+    case PROXY_FAILED:
+        error_reply(fd, req, status, req->uri,
+                    status == 504 ? "Backend did not respond in time"
+                                  : "Backend failed",
+                    keep);
+        next = *keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        break;
+    case PROXY_REPLIED:
+        next = *keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        break;
+    case PROXY_RESET:
+        next = CONN_CLOSE_RESET;
+        break;
+    default:
+        next = CONN_CLOSE_SILENT;
+        break;
+    }
+    request_log(req, status, backend);
+    return next;
+}
+
+/*
+ * '?' 앞 경로에 "..", "." 조각이나 중간의 빈 조각("//")이 있으면 0 (M6-7).
+ * 경로 끝의 '/'는 허용. URI는 '/'로 시작함 (파서가 검사, M7-1).
+ */
+static int uri_path_is_clean(const char *uri)
+{
+    const char *q = strchr(uri, '?');
+    size_t len = q ? (size_t)(q - uri) : strlen(uri);
+    size_t start = 1;
+
+    for (size_t i = 1; i <= len; i++) {
+        if (i < len && uri[i] != '/') {
+            continue;
+        }
+        size_t seg = i - start;
+        if (seg == 0 && i < len) {
+            return 0; /* "//" */
+        }
+        if (seg == 1 && uri[start] == '.') {
+            return 0; /* "/./" */
+        }
+        if (seg == 2 && uri[start] == '.' && uri[start + 1] == '.') {
+            return 0; /* "/../" */
+        }
+        start = i + 1;
+    }
+    return 1;
+}
+
 /* ============================== M2: 경로 확인 (Phase 1에서 이어짐) ============================== */
 
-static int uri_has_dot_dot(const char *path, size_t len);
 static int uri_parse(const char *uri, char *filename, char *cgiargs);
 static int static_serve(int fd, const struct http_request *req,
                         const char *filename, off_t filesize, int *keep);
 static int cgi_serve(int fd, const struct http_request *req,
                      const char *filename, const char *cgiargs, int *keep);
 
-/* 요청을 정적 파일 / CGI로 보냄. 보낸 상태 코드를 돌려줌 */
+/*
+ * 요청을 정적 파일 / CGI로 보냄. 보낸 상태 코드를 돌려줌.
+ * 검사 순서: 파일 없음 404 → 메서드 405 → 파일 종류와 권한 403 (M7-3)
+ */
 static int request_route(int fd, struct http_request *req, int *keep)
 {
     char filename[MAXLINE], cgiargs[MAXLINE];
-    const char *question = strchr(req->uri, '?');
-    size_t path_len = question ? (size_t)(question - req->uri)
-                               : strlen(req->uri);
     struct stat sbuf;
     int is_static;
 
-    /* 폴더 밖으로 나가는 ".." 경로 조각 → 403 (Phase 1) */
-    if (uri_has_dot_dot(req->uri, path_len)) {
-        return error_reply(fd, req, 403, req->uri,
-                           "Tiny doesn't serve files outside its folder",
-                           keep);
-    }
     is_static = uri_parse(req->uri, filename, cgiargs);
     if (is_static < 0) {
         *keep = 0;
@@ -566,9 +974,10 @@ static int request_route(int fd, struct http_request *req, int *keep)
     }
 
     if (is_static) {
-        if (strcmp(req->method, "POST") == 0) { /* 정적 파일 POST: 501 유지 */
-            return error_reply(fd, req, 501, req->method,
-                               "Tiny does not implement this method", keep);
+        if (strcmp(req->method, "POST") == 0) { /* 서버는 알지만 이 대상에는 안 됨 */
+            return error_reply_extra(fd, req, 405, "Allow: GET, HEAD\r\n",
+                                     req->method,
+                                     "Static files allow GET and HEAD", keep);
         }
         if (!S_ISREG(sbuf.st_mode) || !(S_IRUSR & sbuf.st_mode)) {
             return error_reply(fd, req, 403, filename,
@@ -577,32 +986,16 @@ static int request_route(int fd, struct http_request *req, int *keep)
         return static_serve(fd, req, filename, sbuf.st_size, keep);
     }
 
-    if (strcmp(req->method, "HEAD") == 0) { /* CGI에 HEAD: 501 */
-        return error_reply(fd, req, 501, req->method,
-                           "Tiny does not implement HEAD for CGI", keep);
+    if (strcmp(req->method, "HEAD") == 0) { /* CGI에 HEAD: 본문 없이 405 */
+        return error_reply_extra(fd, req, 405, "Allow: GET, POST\r\n",
+                                 req->method, "CGI programs allow GET and POST",
+                                 keep);
     }
     if (!S_ISREG(sbuf.st_mode) || !(S_IXUSR & sbuf.st_mode)) {
         return error_reply(fd, req, 403, filename,
                            "Tiny couldn't run the CGI program", keep);
     }
     return cgi_serve(fd, req, filename, cgiargs, keep);
-}
-
-/* path 앞 len 글자를 '/'로 나눈 조각 중 정확히 ".."이 있으면 1 (Phase 1) */
-static int uri_has_dot_dot(const char *path, size_t len)
-{
-    size_t start = 0;
-
-    for (size_t i = 0; i <= len; i++) {
-        if (i == len || path[i] == '/') {
-            if (i - start == 2 && path[start] == '.' &&
-                path[start + 1] == '.') {
-                return 1;
-            }
-            start = i + 1;
-        }
-    }
-    return 0;
 }
 
 /*
@@ -663,7 +1056,7 @@ static int static_serve(int fd, const struct http_request *req,
     close(srcfd);
 
     if (response_head_send(fd, 200, NULL, http_mime_type(filename), NULL,
-                           (size_t)filesize, *keep) < 0 ||
+                           (size_t)filesize, keep) < 0 ||
         (srcp != NULL && write_all(fd, srcp, (size_t)filesize) < 0)) {
         *keep = 0; /* 응답을 보내다 실패하면 바로 닫음 */
     }
@@ -673,7 +1066,7 @@ static int static_serve(int fd, const struct http_request *req,
     return 200;
 }
 
-/* ============================== M5: CGI (final.md 4장) ============================== */
+/* ============================== M5: CGI (m4m5.md 4장) ============================== */
 
 enum cgi_result { CGI_OK, CGI_FAILED, CGI_TIMEOUT };
 
@@ -715,7 +1108,7 @@ static int cgi_input_open(const struct http_request *req)
 }
 
 /*
- * 자식에서 fd 3 이상을 모두 닫습니다 (final.md 2.6 두 번째 겹).
+ * 자식에서 fd 3 이상을 모두 닫습니다 (m4m5.md 2.6 두 번째 겹).
  *   다른 작업자가 맡은 손님 소켓, 리스닝 소켓을 CGI가 물려받지 않게 함.
  *   fork 뒤라 async-signal-safe 함수(close)만 씀. 범위는 부모가 미리 계산.
  */
@@ -828,6 +1221,9 @@ static int cgi_output_collect(pid_t pid, int outfd, char **out,
     goto done;
 
 kill_child:
+    /* CGI는 자기 프로세스 그룹에 있음. 그룹과 CGI 자신에게 모두 보냄:
+     * 아직 setpgid 전이면 그룹이 없고, 그룹을 옮겼으면 그룹 kill이 안 닿음 (M7-9) */
+    kill(-pid, SIGKILL);
     kill(pid, SIGKILL);
     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
     }
@@ -941,7 +1337,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
     }
 
     if (response_head_send(fd, status, reason, NULL, extra, len - body_start,
-                           *keep) < 0 ||
+                           keep) < 0 ||
         (len > body_start &&
          write_all(fd, out + body_start, len - body_start) < 0)) {
         *keep = 0;
@@ -950,7 +1346,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
 }
 
 /*
- * CGI 실행 (final.md 4.3)
+ * CGI 실행 (m4m5.md 4.3, M7-9)
  *   fork 전(부모): envp, 입력 fd, 출력 파이프 준비
  *   자식: dup2(입력 → stdin, 파이프 → stdout) → fd 3 이상 close → execve
  *         (멀티스레드 fork 뒤라 setenv, malloc을 쓰지 않음)
@@ -969,6 +1365,8 @@ static int cgi_serve(int fd, const struct http_request *req,
     char *out = NULL;
     size_t out_len = 0;
     int result, status;
+    sigset_t no_signals;
+    struct sigaction default_action;
 
     /* 1. envp: 부모가 fork 전에 만들어 둠 (2.5) */
     snprintf(env_method, sizeof(env_method), "REQUEST_METHOD=%s",
@@ -1007,7 +1405,11 @@ static int cgi_serve(int fd, const struct http_request *req,
     fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
     fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
 
-    /* 3. fork */
+    /* 3. fork. 자식에서 쓸 시그널 설정은 fork 전에 만들어 둠 */
+    sigemptyset(&no_signals);
+    memset(&default_action, 0, sizeof(default_action));
+    default_action.sa_handler = SIG_DFL;
+    sigemptyset(&default_action.sa_mask);
     pid = fork();
     if (pid < 0) {
         close(infd);
@@ -1016,6 +1418,12 @@ static int cgi_serve(int fd, const struct http_request *req,
         return error_reply(fd, req, 500, filename, "CGI fork failed", keep);
     }
     if (pid == 0) { /* 자식: async-signal-safe 함수만 */
+        /* 자기 프로세스 그룹: 터미널의 Ctrl+C는 서버 그룹 전체에 가므로,
+         * 나누지 않으면 정상 종료 중인 CGI 요청이 함께 죽음 (M7-9) */
+        setpgid(0, 0);
+        /* 막은 시그널과 무시한 SIGPIPE는 execve 뒤에도 남음 → 되돌림 */
+        sigaction(SIGPIPE, &default_action, NULL);
+        sigprocmask(SIG_SETMASK, &no_signals, NULL);
         if (dup2(infd, STDIN_FILENO) < 0 ||
             dup2(pipefd[1], STDOUT_FILENO) < 0) {
             _exit(127);
@@ -1024,6 +1432,8 @@ static int cgi_serve(int fd, const struct http_request *req,
         execve(filename, argv, envp);
         _exit(127); /* execve 실패 → 부모가 500 */
     }
+
+    setpgid(pid, pid); /* 부모도 설정: kill(-pid)가 자식 실행 전에도 닿게 함 */
 
     /* 4. 부모: 자식이 쓰는 쪽을 닫아야 자식이 끝날 때 EOF를 받음 */
     close(infd);

@@ -135,9 +135,10 @@ class TinyBaselineTest(unittest.TestCase):
         status, _ = self.request("GET", "/nope.html")
         self.assertEqual(status, 404)
 
-    def test_post_is_501(self):
+    def test_static_post_is_405(self):
+        # Phase 2 M7-3: 정적 파일에 POST는 501이 아니라 405 (docs/prd/m6m7.md)
         status, _ = self.request("POST", "/home.html")
-        self.assertEqual(status, 501)
+        self.assertEqual(status, 405)
 
 
 if __name__ == "__main__":
