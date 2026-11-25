@@ -119,5 +119,44 @@ class F3ErrorPageEscapeTest(unittest.TestCase):
         self.assertIn(b"&lt;b&gt;x&lt;/b&gt;", body)
 
 
+def one_shot_backend(response):
+    """연결 하나를 받아 요청 헤더를 읽고 response를 그대로 보낸 뒤 닫는 백엔드"""
+    import threading
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind((HOST, 0))
+    listener.listen(1)
+
+    def serve():
+        conn, _ = listener.accept()
+        with conn:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            conn.sendall(response)
+        listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener.getsockname()[1]
+
+
+class F4Head204Test(unittest.TestCase):
+    """F4: 중계한 HEAD + 204 응답에 Content-Length가 붙음"""
+
+    def test_head_204_relay_has_no_content_length(self):
+        port = one_shot_backend(b"HTTP/1.0 204 No Content\r\nContent-Length: 5\r\n\r\n")
+        server = Server("--route", "/api=127.0.0.1:%d" % port)
+        try:
+            status, headers, body = server.exchange(
+                b"HEAD /api/x HTTP/1.1\r\nHost: x\r\n\r\n", head_request=True)
+            self.assertEqual(status, 204)
+            self.assertNotIn("content-length", headers)
+            self.assertEqual(body, b"")
+        finally:
+            server.stop()
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

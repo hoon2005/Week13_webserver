@@ -497,11 +497,12 @@ int proxy_response_parse(const char *head, size_t len, int head_request,
         }
     }
 
-    if (head_request || res->status == 304) {
-        res->body = PROXY_BODY_NONE; /* 길이는 있으면 그대로 알려 줌 */
-    } else if (res->status == 204) {
+    /* 204를 HEAD보다 먼저 봄: 두 규칙이 겹치면 204가 우선 (F4, RFC 9110 8.6) */
+    if (res->status == 204) {
         res->body = PROXY_BODY_NONE;
         res->has_length = 0; /* 204에는 Content-Length를 보내지 않음 */
+    } else if (head_request || res->status == 304) {
+        res->body = PROXY_BODY_NONE; /* 길이는 있으면 그대로 알려 줌 */
     } else if (res->has_length) {
         res->body = PROXY_BODY_LENGTH;
     } else {

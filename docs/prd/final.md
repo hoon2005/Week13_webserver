@@ -441,8 +441,8 @@ X-Forwarded-For: 1.2.3.4                Connection: close
 | --- | --- | --- |
 | `Content-Length` 있음 | 그 길이만큼. 더 온 데이터는 버림 | 유지 |
 | `Content-Length` 없음 | 백엔드가 닫을 때까지 | 닫음 |
-| HEAD 응답, `304` | 없음. 백엔드가 준 `Content-Length`가 있으면 전달하고, 없으면 만들지 않음 | 유지 |
-| HEAD가 아닌 요청의 `204` | 없음. `Content-Length`도 보내지 않음 | 유지 |
+| `204` (HEAD 요청이어도) | 없음. `Content-Length`도 보내지 않음. HEAD 규칙보다 우선 (RFC 9110 8.6) | 유지 |
+| HEAD 응답(`204` 제외), `304` | 없음. 백엔드가 준 `Content-Length`가 있으면 전달하고, 없으면 만들지 않음 | 유지 |
 | `100`, `103` 등 중간 응답 | 전달하지 않고 다음 응답을 읽음 | |
 | `101`, `Transfer-Encoding`, 형식 오류, 서로 다른 길이 | `502`로 바꿈 | 유지 |
 
