@@ -1,0 +1,14 @@
+#!/bin/sh
+# 테스트용 CGI: QUERY_STRING에 따라 HTTP 규칙에 어긋나는 출력을 냄 (F8)
+case "$QUERY_STRING" in
+204) printf 'Status: 204 No Content\r\n\r\nBODY' ;;
+304) printf 'Status: 304 Not Modified\r\nContent-Length: 4\r\n\r\nBODY' ;;
+100) printf 'Status: 100 Continue\r\n\r\nBODY' ;;
+101) printf 'Status: 101 Switching Protocols\r\nUpgrade: x\r\n\r\n' ;;
+te) printf 'Content-type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nBODY\r\n0\r\n\r\n' ;;
+badname) printf 'Content-type: text/plain\r\nBad Name: x\r\n\r\nBODY' ;;
+emptyname) printf 'Content-type: text/plain\r\n: x\r\n\r\nBODY' ;;
+ctl) printf 'Content-type: text/plain\r\nX-A: a\rb\r\n\r\nBODY' ;;
+hop) printf 'Content-type: text/plain\r\nKeep-Alive: timeout=99\r\nUpgrade: x\r\nX-Ok: 1\r\n\r\nBODY' ;;
+*) printf 'Content-type: text/plain\r\n\r\nBODY' ;;
+esac

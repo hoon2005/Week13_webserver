@@ -587,6 +587,9 @@ static ssize_t reader_readn(struct conn_reader *r, char *usrbuf, size_t len,
  */
 #define KEEP_SEND_FAILED (-1)
 
+/* response_head_send의 length로 주면 Content-Length 줄을 쓰지 않음 (204, 304) */
+#define NO_CONTENT_LENGTH ((size_t)-1)
+
 static int write_all(int fd, const void *buf, size_t n)
 {
     return rio_writen(fd, (void *)buf, n) == (ssize_t)n ? 0 : -1;
@@ -598,6 +601,7 @@ static int write_all(int fd, const void *buf, size_t n)
  *   content_type이 NULL이면 Content-Type 줄을 쓰지 않음 (CGI는 extra에 들어 있음).
  *   extra: "이름: 값\r\n" 형식의 추가 헤더 (없으면 NULL)
  *   종료가 시작됐으면 Connection: close로 보내고 *keep을 0으로 (M7-7)
+ *   length가 NO_CONTENT_LENGTH면 Content-Length 줄을 쓰지 않음 (204, 304)
  */
 static int response_head_send(int fd, int status, const char *reason,
                               const char *content_type, const char *extra,
@@ -605,6 +609,7 @@ static int response_head_send(int fd, int status, const char *reason,
 {
     char header[MAXBUF * 2];
     char type_line[HTTP_FIELD_MAX + 32] = "";
+    char length_line[64] = "";
     int n;
 
     if (atomic_load(&stopping)) {
@@ -614,14 +619,18 @@ static int response_head_send(int fd, int status, const char *reason,
         snprintf(type_line, sizeof(type_line), "Content-Type: %s\r\n",
                  content_type);
     }
+    if (length != NO_CONTENT_LENGTH) {
+        snprintf(length_line, sizeof(length_line), "Content-Length: %zu\r\n",
+                 length);
+    }
     n = snprintf(header, sizeof(header),
                  "HTTP/1.1 %d %s\r\n"
                  "Server: Tiny Web Server\r\n"
-                 "%s%s"
-                 "Content-Length: %zu\r\n"
+                 "%s%s%s"
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
-                 extra ? extra : "", length, *keep > 0 ? "keep-alive" : "close");
+                 extra ? extra : "", length_line,
+                 *keep > 0 ? "keep-alive" : "close");
     if (n < 0 || n >= (int)sizeof(header) ||
         write_all(fd, header, (size_t)n) < 0) {
         *keep = KEEP_SEND_FAILED;
@@ -1319,7 +1328,31 @@ done:
  *   Status: 404 Not Found가 있으면 그 상태, 없으면 200
  *   Content-Length, Connection은 CGI 값을 무시하고 서버가 직접 씀
  *   빈 줄이 없거나, 출력이 비었거나, ':' 없는 헤더 줄이면 500
+ * 중계 응답(proxy_response_parse)과 같은 HTTP 규칙으로 검사 (F8)
+ *   500: 1xx 상태(101 포함), Transfer-Encoding, 토큰이 아닌 헤더 이름, 제어 문자
+ *   204, 304: 본문과 Content-Length 없이 헤더에서 끝냄 (RFC 9110 8.6, 9112 6.3)
+ *     204: RFC가 Content-Length를 금지함
+ *     304: 선택이 아니라 필수. 서버가 쓰는 Content-Length는 실제 본문 길이(0)인데,
+ *          304의 Content-Length는 같은 요청에 200을 보냈을 때의 길이여야 해서
+ *          0은 틀린 값임 (RFC 9110 8.6). 중계는 백엔드가 준 값을 그대로 전달할
+ *          수 있어 304의 길이를 남김. 그래서 304에서만 CGI와 중계 규칙이 다름
+ *   홉 단위 헤더(Keep-Alive, Upgrade 등)는 뺌
  */
+
+/* CGI가 써도 클라이언트에 보내지 않는 헤더: 서버가 쓰거나 한 구간 전용 */
+static const char *const CGI_DROP[] = {
+    "Content-Length", "Connection", "Keep-Alive", "Proxy-Connection",
+    "TE",             "Trailer",    "Upgrade",    NULL};
+
+static int cgi_header_dropped(const char *name, size_t len)
+{
+    for (int i = 0; CGI_DROP[i] != NULL; i++) {
+        if (strlen(CGI_DROP[i]) == len && strncasecmp(name, CGI_DROP[i], len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 static int cgi_reply(int fd, const struct http_request *req, const char *out,
                      size_t len, int *keep)
 {
@@ -1362,11 +1395,20 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
         if (end > pos) {
             size_t line_len = end - pos;
             colon = memchr(out + pos, ':', line_len);
-            if (colon == NULL) {
+            if (colon == NULL || http_has_ctl(out + pos, line_len)) {
                 return error_reply(fd, req, 500, req->uri,
                                    "Malformed CGI header", keep);
             }
             size_t name_len = (size_t)(colon - (out + pos));
+            if (!http_is_token(out + pos, name_len)) {
+                return error_reply(fd, req, 500, req->uri,
+                                   "Malformed CGI header name", keep);
+            }
+            if (name_len == 17 &&
+                strncasecmp(out + pos, "Transfer-Encoding", 17) == 0) {
+                return error_reply(fd, req, 500, req->uri,
+                                   "CGI must not set Transfer-Encoding", keep);
+            }
             if (name_len == 6 && strncasecmp(out + pos, "Status", 6) == 0) {
                 const char *v = colon + 1;
                 const char *vend = out + end;
@@ -1380,7 +1422,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
                 }
                 memcpy(num, v, 3);
                 status = atoi(num);
-                if (status < 100 || status > 599) {
+                if (status < 200 || status > 599) { /* 1xx는 최종 응답이 아님 */
                     return error_reply(fd, req, 500, req->uri,
                                        "Malformed CGI status", keep);
                 }
@@ -1393,11 +1435,8 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
                     snprintf(reason, sizeof(reason), "%s",
                              http_status_text(status));
                 }
-            } else if ((name_len == 14 &&
-                        strncasecmp(out + pos, "Content-Length", 14) == 0) ||
-                       (name_len == 10 &&
-                        strncasecmp(out + pos, "Connection", 10) == 0)) {
-                /* 서버가 직접 씀 */
+            } else if (cgi_header_dropped(out + pos, name_len)) {
+                /* 서버가 직접 쓰거나 한 구간 전용 */
             } else {
                 if (extra_len + line_len + 3 > sizeof(extra)) {
                     return error_reply(fd, req, 500, req->uri,
@@ -1412,6 +1451,14 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
         pos = eol + 1;
     }
 
+    /* 본문 없이 헤더에서 끝남. 304에 길이를 쓰면 틀린 값(0)이라 반드시 뺌 */
+    if (status == 204 || status == 304) {
+        if (response_head_send(fd, status, reason, NULL, extra,
+                               NO_CONTENT_LENGTH, keep) < 0) {
+            *keep = KEEP_SEND_FAILED;
+        }
+        return status;
+    }
     if (response_head_send(fd, status, reason, NULL, extra, len - body_start,
                            keep) < 0 ||
         (len > body_start &&

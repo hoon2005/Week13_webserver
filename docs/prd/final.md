@@ -378,9 +378,12 @@ HTTP/1.1 요청에 `Expect: 100-continue`와 본문이 있으면, 검사를 통�
 | 정상 종료, 헤더와 빈 줄이 있음 | `Status` 헤더의 값, 없으면 `200` |
 | 준비 실패, 실행 실패, 0이 아닌 종료, 시그널로 종료 | `500` |
 | 출력이 비었음, 빈 줄이 없음, `:`이 없는 헤더 줄, 잘못된 `Status` 값, 헤더 8 KiB 초과, 출력 1 MiB 초과 | `500` |
+| `Status`가 1xx(`101` 포함), `Transfer-Encoding` 헤더, 토큰이 아닌 헤더 이름, 제어 문자가 든 헤더 줄 (F8, 중계 응답과 같은 규칙) | `500` |
+| `Status`가 `204` | 본문과 `Content-Length` 없이 헤더에서 끝냄. 204의 `Content-Length`는 RFC가 금지함 (F8, RFC 9110 8.6) |
+| `Status`가 `304` | 본문과 `Content-Length` 없이 헤더에서 끝냄 (F8). 서버가 쓰는 길이는 실제 본문 길이(0)인데, 304의 `Content-Length`는 같은 요청에 200을 보냈을 때의 길이여야 하므로 0은 틀린 값임. 그래서 선택이 아니라 필수로 뺌 (RFC 9110 8.6). 중계는 백엔드가 준 값을 그대로 전달하므로 304의 길이를 남김: 304에서만 CGI와 중계 규칙이 다름 |
 | 10초 안에 끝나지 않음 | `504` |
 
-`Content-Length`와 `Connection`은 CGI가 준 값을 쓰지 않고 서버가 직접 정합니다. 응답 길이를 서버가 세므로 CGI 응답 뒤에도 연결을 유지할 수 있습니다.
+`Content-Length`와 `Connection`은 CGI가 준 값을 쓰지 않고 서버가 직접 정합니다. `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Upgrade` 같은 홉 단위 헤더도 뺍니다 (F8). 응답 길이를 서버가 세므로 CGI 응답 뒤에도 연결을 유지할 수 있습니다.
 
 ### 5.5 Reverse Proxy (M6)
 

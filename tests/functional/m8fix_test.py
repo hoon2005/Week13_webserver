@@ -238,5 +238,56 @@ class F7AdderRangeTest(unittest.TestCase):
         self.assertIn(b"Invalid number", body)
 
 
+class F8CgiOutputRulesTest(unittest.TestCase):
+    """F8: CGI 출력이 HTTP 응답 규칙을 어겨도 그대로 나감 (권장안 A)"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def two_on_one_connection(self, query):
+        """한 연결로 CGI 요청과 home.html을 이어 보냄. 두 응답의 원문을 돌려줌"""
+        with self.server.connect() as sock:
+            sock.sendall(b"GET /cgi-bin/emit?" + query + b" HTTP/1.1\r\nHost: x\r\n\r\n"
+                         b"GET /home.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            out = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return out
+                out += chunk
+
+    def test_204_and_304_end_at_headers(self):
+        # 304는 CGI가 Content-Length: 4를 줘도 뺌. 서버가 세는 길이(0)는
+        # 200일 때의 길이가 아니라 틀린 값이기 때문 (RFC 9110 8.6)
+        for query, status in ((b"204", b"204"), (b"304", b"304")):
+            with self.subTest(status=status):
+                out = self.two_on_one_connection(query)
+                head, _, rest = out.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 " + status), head)
+                self.assertNotIn(b"content-length", head.lower())
+                # 남은 본문 없이 바로 다음 응답이 시작해야 함
+                self.assertTrue(rest.startswith(b"HTTP/1.1 200"), rest[:40])
+
+    def test_invalid_cgi_output_is_500(self):
+        for query in (b"100", b"101", b"te", b"badname", b"emptyname", b"ctl"):
+            with self.subTest(query=query):
+                status, _, body = self.server.get("/cgi-bin/emit?" + query.decode())
+                self.assertEqual(status, 500)
+                self.assertNotIn(b"BODY", body)
+
+    def test_hop_by_hop_headers_are_dropped(self):
+        status, headers, body = self.server.get("/cgi-bin/emit?hop")
+        self.assertEqual(status, 200)
+        self.assertNotIn("keep-alive", headers)
+        self.assertNotIn("upgrade", headers)
+        self.assertEqual(headers["x-ok"], "1")
+        self.assertEqual(body, b"BODY")
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
