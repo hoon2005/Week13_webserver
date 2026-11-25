@@ -205,5 +205,38 @@ class F6LongPathTest(unittest.TestCase):
             server.stop()
 
 
+class F7AdderRangeTest(unittest.TestCase):
+    """F7: adder가 입력 하나라도 1,073,741,823을 넘으면 거절"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_sum_within_int_is_computed(self):
+        for query, answer in (("2000000000&1", b"2000000000 + 1 = 2000000001"),
+                              ("-2000000000&-1", b"-2000000000 + -1 = -2000000001"),
+                              ("2147483647&-2147483648", b"= -1")):
+            with self.subTest(query=query):
+                status, _, body = self.server.get("/cgi-bin/adder?" + query)
+                self.assertEqual(status, 200)
+                self.assertIn(answer, body)
+
+    def test_sum_beyond_int_is_explained(self):
+        for query in ("2147483647&1", "-2147483648&-1"):
+            with self.subTest(query=query):
+                status, _, body = self.server.get("/cgi-bin/adder?" + query)
+                self.assertEqual(status, 200)
+                self.assertIn(b"out of range", body)
+                self.assertNotIn(b"answer", body)
+
+    def test_input_beyond_int_is_invalid(self):
+        status, _, body = self.server.get("/cgi-bin/adder?2147483648&0")
+        self.assertIn(b"Invalid number", body)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)

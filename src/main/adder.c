@@ -24,8 +24,8 @@ static int number_parse(const char *part, int *out)
     }
     errno = 0;
     v = strtol(s, &end, 10);
-    if (*end != '\0' || errno == ERANGE || v < INT_MIN / 2 || v > INT_MAX / 2) {
-        return -1; /* 숫자가 아니거나, 더했을 때 int를 넘을 수 있는 값 */
+    if (*end != '\0' || errno == ERANGE || v < INT_MIN || v > INT_MAX) {
+        return -1; /* 숫자가 아니거나 int를 넘는 값. 합의 범위는 main이 검사 (F7) */
     }
     *out = (int)v;
     return 0;
@@ -72,6 +72,7 @@ int main(void)
     const char *query = input_read(input, sizeof(input));
     char *amp;
     int n1, n2;
+    long long sum;
 
     snprintf(work, sizeof(work), "%s", query);
     amp = strchr(work, '&');
@@ -85,12 +86,19 @@ int main(void)
             snprintf(content, sizeof(content),
                      "Welcome to add.com: THE Internet addition portal.\r\n<p>"
                      "Invalid number. Use integers like 1&2 or a=1&b=2\r\n");
+        } else if ((sum = (long long)n1 + n2) < INT_MIN || sum > INT_MAX) {
+            /* 넓은 타입으로 더해 넘침 없이 합을 검사함 (F7) */
+            snprintf(content, sizeof(content),
+                     "Welcome to add.com: THE Internet addition portal.\r\n<p>"
+                     "The sum is out of range. Use a pair whose sum is "
+                     "between %d and %d\r\n",
+                     INT_MIN, INT_MAX);
         } else {
             snprintf(content, sizeof(content),
                      "Welcome to add.com: THE Internet addition portal.\r\n<p>"
                      "The answer is: %d + %d = %d\r\n<p>"
                      "Thanks for visiting!\r\n",
-                     n1, n2, n1 + n2);
+                     n1, n2, (int)sum);
         }
     }
 
