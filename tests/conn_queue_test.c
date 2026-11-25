@@ -1,5 +1,5 @@
 /*
- * conn_queue 단위 테스트 (final.md 8.1 경쟁 상태)
+ * conn_queue 단위 테스트 (m4m5.md 8.1 경쟁 상태)
  *   make test: ASan으로 실행, make tsan: ThreadSanitizer로 실행
  */
 #include "acutest.h"

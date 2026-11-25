@@ -1,5 +1,5 @@
 /*
- * adder - 두 수를 더하는 CGI 프로그램입니다 (final.md 4.5).
+ * adder - 두 수를 더하는 CGI 프로그램입니다 (m4m5.md 4.5).
  *   GET:  QUERY_STRING "1&2" 또는 "a=1&b=2"
  *   POST: 표준 입력에서 CONTENT_LENGTH바이트 ("a=1&b=2" 또는 "1&2")
  *   출력은 CGI 형식: Content-type 헤더 + 빈 줄 + 본문.
