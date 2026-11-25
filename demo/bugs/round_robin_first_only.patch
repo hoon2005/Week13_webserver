@@ -1,0 +1,14 @@
+diff --git a/src/proxy.c b/src/proxy.c
+index 237a97a..12bded5 100644
+--- a/src/proxy.c
++++ b/src/proxy.c
+@@ -210,7 +210,8 @@ struct proxy_route *proxy_route_find(struct proxy_table *t, const char *uri)
+ int proxy_backend_start(struct proxy_route *r)
+ {
+     unsigned n = atomic_fetch_add_explicit(&r->next, 1, memory_order_relaxed);
+-    return (int)(n % (unsigned)r->backend_count);
++    (void)n;
++    return 0; /* 버그: 항상 첫 번째 백엔드만 고름 */
+ }
+ 
+ /* ============================== 헤더 만들기 ============================== */

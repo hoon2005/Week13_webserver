@@ -1,0 +1,13 @@
+diff --git a/src/http.c b/src/http.c
+index 77bb221..45473b9 100644
+--- a/src/http.c
++++ b/src/http.c
+@@ -366,7 +366,7 @@ struct mime_entry {
+ };
+ 
+ static const struct mime_entry MIME_TYPES[] = {
+-    {"html", "text/html"}, {"css", "text/css"},   {"js", "text/javascript"},
++    {"html", "text/html"}, {"css", "text/plain"},   {"js", "text/javascript"},
+     {"png", "image/png"},  {"jpg", "image/jpeg"}, {"jpeg", "image/jpeg"},
+     {"gif", "image/gif"},
+ };
