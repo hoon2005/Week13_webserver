@@ -16,5 +16,6 @@ make help     # 다른 명령 목록
 | 문서 | 내용 |
 | --- | --- |
 | [CONVENTION.md](CONVENTION.md) | 팀 규칙 초안, 개발 환경, 빌드 명령, 코드 규칙, 테스트 규칙 |
+| [docs/prd/final.md](docs/prd/final.md) | 최종 PRD. 요구사항, 구조, 설계 결정, 검증, 한계 |
 | [docs/prd/](docs/prd/README.md) | 개인 PRD 초안, 최종 PRD |
 | [docs/measurements/](docs/measurements/) | 부하 테스트 등 측정 기록 |
