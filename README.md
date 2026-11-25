@@ -130,7 +130,7 @@ A와 B는 백엔드가 보낸 응답 본문으로 구분합니다. 백엔드가 
 
 ## 5. ⭐ 검증
 
-[시나리오 139개](docs/testing/scenarios.md)를 다섯 가지 품질로 나눠 확인했습니다.
+[시나리오 139개](docs/testing/scenarios.csv)를 다섯 가지 품질로 나눠 확인했습니다.
 
 | 품질 | 질문 | 시나리오 |
 |---|---|---:|
@@ -309,7 +309,7 @@ $ curl http://localhost:8000/api/whoami.txt
 |---|---|
 | 무엇을, 왜 이렇게 만들었나 | [최종 PRD](docs/prd/final.md): 요구사항, 구조, 설계 결정, 한계 |
 | 어떻게 실행하고 시연하나 | [데모 실행 방법](demo/README.md), [CONVENTION.md](CONVENTION.md): 개발 환경, 빌드 명령, 팀 규칙 |
-| 무엇을 검증했나 | [테스트 시나리오](docs/testing/scenarios.md): 시나리오 139개와 확인하는 테스트 |
+| 무엇을 검증했나 | [테스트 시나리오](docs/testing/scenarios.csv): 시나리오 139개와 확인하는 테스트. 열 설명과 분류 기준은 [읽는 법](docs/testing/scenarios-guide.csv) |
 | 검증을 어떻게 다시 하나 | [검증 실행 방법](docs/testing/validation-guide.md): 순서, 합격 기준, 로그 남기기 |
 | 검증 결과는 어떤가 | [M8 검증 기록](docs/measurements/001-m8-validation.md): 테스트 결과, 고친 문제, 성능, 한계 |
 

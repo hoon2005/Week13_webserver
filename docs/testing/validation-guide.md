@@ -1,6 +1,6 @@
 # 검증 실행 방법
 
-M8 검증을 다시 실행하는 방법입니다. 무엇을 확인하는지는 [테스트 시나리오](scenarios.md)에, 실행 결과는 [M8 검증 기록](../measurements/001-m8-validation.md)에 있습니다.
+M8 검증을 다시 실행하는 방법입니다. 무엇을 확인하는지는 [테스트 시나리오](scenarios.csv)에, 실행 결과는 [M8 검증 기록](../measurements/001-m8-validation.md)에 있습니다.
 
 ## 준비
 
