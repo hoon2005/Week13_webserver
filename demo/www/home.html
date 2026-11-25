@@ -2,48 +2,185 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<title>Tiny 웹 서버 데모</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Web Server Playground</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-<h1>Tiny 웹 서버 데모</h1>
-<p class="sub">이 페이지는 우리 팀이 C로 만든 웹 서버가 <code>demo/www/</code> 폴더에서 보내고 있습니다.</p>
-<p class="tip">개발자 도구 → Network 탭 → "Disable cache"를 켜고 보세요.</p>
+<div class="shell">
+
+<!-- 상단 바 -->
+<header class="topbar">
+<div class="brand"><b>Web Server Playground</b><span>HTTP/1.1 · C · POSIX Sockets · Thread Pool</span></div>
+<nav class="pillnav">
+<a href="#static">정적 파일</a>
+<a href="#cgi">CGI</a>
+<a href="#proxy">프록시</a>
+</nav>
+<div class="server-pill"><span class="live"></span>서버 3개 실행 중 <code id="ports">:8000 :8001 :8002</code></div>
 </header>
 
-<section>
-<h2><span class="num">1</span> 정적 파일: 파일 종류(MIME)를 맞게 보내는가</h2>
-<table>
-<tr><th>파일</th><th>Network 탭에서 볼 Content-Type</th><th>맞으면 보이는 것</th></tr>
-<tr><td><code>home.html</code></td><td><code>text/html</code></td><td>이 페이지</td></tr>
-<tr><td><code>style.css</code></td><td><code>text/css</code></td><td>글꼴, 테두리, 색</td></tr>
-<tr><td><code>app.js</code></td><td><code>text/javascript</code></td><td id="js" class="bad">❌ JS가 실행되지 않음</td></tr>
-<tr><td><code>crying_cat.jpg</code></td><td><code>image/jpeg</code></td><td>아래 고양이</td></tr>
-</table>
-<img src="crying_cat.jpg" alt="우는 고양이" width="400">
+<div id="warn" class="warn" hidden></div>
+
+<div class="body">
+
+<!-- 왼쪽: 요청 이력 -->
+<aside class="panel side">
+<div class="panel-head">
+<span class="ico"><svg viewBox="0 0 20 20"><path d="M10 5v5l3 2M10 2a8 8 0 1 1 0 16a8 8 0 0 1 0-16"/></svg></span>
+<div><h2>요청 이력</h2><p class="sub">이 페이지가 fetch()로 보낸 요청</p></div>
+<button type="button" id="h-clear" class="link">지우기</button>
+</div>
+<div class="side-stats">
+<div><b id="h-total">0</b><span>전체</span></div>
+<div class="ok"><b id="h-ok">0</b><span>2xx</span></div>
+<div class="err"><b id="h-err">0</b><span>4xx·5xx</span></div>
+</div>
+<div class="side-label">최근 요청</div>
+<ol id="history" class="history"><li class="empty">아직 요청이 없습니다</li></ol>
+</aside>
+
+<main class="main">
+
+<!-- 01 정적 파일 -->
+<section class="panel" id="static">
+<div class="panel-head">
+<span class="ico"><svg viewBox="0 0 20 20"><path d="M5 2h7l4 4v12H5zM12 2v4h4"/></svg></span>
+<div><h2>정적 파일</h2><p class="sub">01 · Static File Serving</p></div>
+</div>
+<p class="desc">이 페이지 자체가 정적 서빙의 예시입니다. 파일 종류(Content-Type)가 맞아야 브라우저가 제대로 씁니다.</p>
+<div class="chips">
+<span class="chip on"><i></i>HTML<small>text/html</small></span>
+<span class="chip on"><i></i>CSS<small>text/css</small></span>
+<span class="chip" id="js"><i></i>JS<small>text/javascript</small></span>
+<span class="chip" id="chip-img"><i></i>JPG<small>image/jpeg</small></span>
+</div>
+<img id="cat" src="crying_cat.jpg" alt="우는 고양이">
+<div class="nf">
+<button type="button" id="nf-btn" class="btn-outline">없는 파일 요청 <code>/nope.html</code></button>
+<div id="nf-result" class="nf-result" hidden>
+<span id="nf-status" class="status-badge"></span>
+<span id="nf-body" class="nf-body"></span>
+</div>
+</div>
 </section>
 
-<section>
-<h2><span class="num">2</span> CGI: 서버가 프로그램을 실행해 응답을 만드는가</h2>
-<p>아무 숫자나 넣어 보세요. 답은 이 페이지에 없고, 누를 때마다 서버가 <code>adder</code> 프로그램을 실행해서 만듭니다.</p>
-<form action="/cgi-bin/adder" method="get">
-GET (값이 주소에 붙음): <input name="a"> + <input name="b">
-<button type="submit">더하기</button>
+<!-- 02 CGI -->
+<section class="panel" id="cgi">
+<div class="panel-head">
+<span class="ico"><svg viewBox="0 0 20 20"><path d="M4 2h12v16H4zM7 6h6M7 10h2M11 10h2M7 14h2M11 14h2"/></svg></span>
+<div><h2>CGI 계산기</h2><p class="sub">02 · POST /cgi-bin/adder</p></div>
+</div>
+<p class="desc">답은 페이지에 없습니다. 누를 때마다 서버가 <code>adder</code> 프로그램을 실행해서 만듭니다.</p>
+<form id="calc" class="calc">
+<input id="a" inputmode="numeric" required aria-label="첫 번째 수">
+<span class="plus">+</span>
+<input id="b" inputmode="numeric" required aria-label="두 번째 수">
+<div class="seg">
+<button type="submit" data-method="GET">GET</button>
+<button type="submit" data-method="POST" class="on">POST</button>
+</div>
 </form>
-<form action="/cgi-bin/adder" method="post">
-POST (값이 본문에 담김): <input name="a"> + <input name="b">
-<button type="submit">더하기</button>
-</form>
-<p class="note">GET은 결과 페이지 주소창에 <code>?a=..&amp;b=..</code>가 보이고, POST는 주소창에 값이 없습니다.</p>
+<div class="answer-row"><span id="answer" class="answer">—</span><span class="answer-label">CGI가 계산한 답</span></div>
+<div class="addr"><span class="addr-ico"><svg viewBox="0 0 20 20"><path d="M10 2a8 8 0 1 1 0 16a8 8 0 0 1 0-16M2 10h16M10 2c3 3 3 13 0 16M10 2c-3 3-3 13 0 16"/></svg></span><span id="addr" class="url">http://localhost:8000/cgi-bin/adder</span></div>
+<pre id="req-raw" class="code"><span class="cm">// 브라우저가 보낸 요청 메시지가 여기에 보입니다</span></pre>
+<p id="calc-note" class="note">GET은 값이 주소(쿼리 문자열)에 붙고, POST는 값이 요청 본문에 담겨 주소에 보이지 않습니다.</p>
 </section>
 
-<section>
-<h2><span class="num">3</span> 오류: 없는 파일을 404로 알려주는가</h2>
-<p><a href="/nope.html">/nope.html</a> → Network 탭에 <code>404</code>, 화면에 "Tiny couldn't find this file"</p>
-<p class="note">403, 413, 502, 504처럼 브라우저로 만들기 어려운 오류는 터미널에서 <code>curl</code>, <code>nc</code>로 보여줍니다.</p>
+<!-- 03 프록시 · Round-Robin -->
+<section class="panel wide" id="proxy">
+<div class="panel-head">
+<span class="ico"><svg viewBox="0 0 20 20"><path d="M3 10h5M8 10c3 0 3-5 6-5h3M8 10c3 0 3 5 6 5h3"/></svg></span>
+<div><h2>프록시 · Round-Robin</h2><p class="sub">03 · /api/* → 백엔드 A, B 번갈아</p></div>
+<div class="head-right">
+<div class="seg big" id="rr-seg">
+<button type="button" data-n="1">요청 1개</button>
+<button type="button" data-n="10">요청 10개</button>
+<button type="button" data-n="100">요청 100개</button>
+</div>
+<button type="button" id="rr-reset" class="round" title="초기화" aria-label="초기화"><svg viewBox="0 0 20 20"><path d="M4 10a6 6 0 1 0 2-4.5M4 3v3h3"/></svg></button>
+</div>
+</div>
+
+<div class="rr">
+<div class="graph">
+<svg id="viz" viewBox="0 0 760 300" role="img" aria-label="브라우저에서 메인 서버를 거쳐 백엔드 A, B로 가는 요청">
+<path id="path-in" class="wire" d="M92 150 C180 150 220 150 318 150"/>
+<path id="path-a" class="wire" d="M382 150 C500 150 520 70 628 70"/>
+<path id="path-b" class="wire" d="M382 150 C500 150 520 230 628 230"/>
+<g class="tagpill" transform="translate(196 136)"><rect width="74" height="24" rx="12"/><text x="37" y="16">GET /api</text></g>
+<g class="tagpill" transform="translate(456 96)"><rect width="88" height="24" rx="12"/><text x="44" y="16">Round-Robin</text></g>
+
+<g class="vnode" id="v-browser">
+<circle cx="60" cy="150" r="32" class="c-browser"/>
+<path class="glyph" d="M48 140h24v20H48zM48 145h24"/>
+<text x="60" y="206" class="lbl">브라우저</text>
+</g>
+<g class="vnode" id="v-proxy">
+<circle cx="350" cy="150" r="32" class="c-proxy"/>
+<path class="glyph" d="M338 142h24M338 150h24M338 158h24"/>
+<text x="350" y="206" class="lbl">메인 서버</text>
+<text x="350" y="224" class="lbl-sub" id="v-port-p">:8000 · 프록시</text>
+<text x="350" y="104" class="next" id="v-next">다음 → A</text>
+</g>
+<g class="vnode" id="v-a">
+<circle cx="660" cy="70" r="32" class="c-a"/>
+<text x="660" y="79" class="nodeletter">A</text>
+<text x="702" y="64" class="lbl left">백엔드 A</text>
+<text x="702" y="84" class="lbl-sub left" id="v-port-a">:8001</text>
+</g>
+<g class="vnode" id="v-b">
+<circle cx="660" cy="230" r="32" class="c-b"/>
+<text x="660" y="239" class="nodeletter">B</text>
+<text x="702" y="224" class="lbl left">백엔드 B</text>
+<text x="702" y="244" class="lbl-sub left" id="v-port-b">:8002</text>
+</g>
+<g id="dots"></g>
+</svg>
+</div>
+
+<div class="kpi">
+<div class="kpi-top">
+<div><b id="cnt-all">0</b><span>보낸 요청</span></div>
+</div>
+<div class="kpi-row">
+<div class="kpi-name"><i class="mark a"></i>백엔드 A</div>
+<div class="hbar"><i id="bar-a" class="fill a"></i></div>
+<div class="kpi-val"><b id="pct-a">0%</b> · <span id="cnt-a">0</span> 요청</div>
+</div>
+<div class="kpi-row">
+<div class="kpi-name"><i class="mark b"></i>백엔드 B</div>
+<div class="hbar"><i id="bar-b" class="fill b"></i></div>
+<div class="kpi-val"><b id="pct-b">0%</b> · <span id="cnt-b">0</span> 요청</div>
+</div>
+<div class="kpi-name trail-label">응답한 순서</div>
+<div id="trail" class="trail"></div>
+</div>
+</div>
 </section>
 
+<!-- 터미널 로그: 왼쪽 프록시, 오른쪽 백엔드 A/B -->
+<section class="logs wide">
+<div class="panel log">
+<div class="log-head"><b>메인 서버 (프록시)</b><span class="state" id="state-p">대기 중</span><code id="pane-p">:8000</code><span class="log-count"><b id="cnt-all2">0</b> 요청</span></div>
+<pre id="log-p" class="log-body"></pre>
+</div>
+<div class="log-col">
+<div class="panel log">
+<div class="log-head"><b>백엔드 A</b><code id="pane-a">:8001</code><span class="log-count a"><b id="cnt-a2">0</b> 처리</span></div>
+<pre id="log-a" class="log-body"></pre>
+</div>
+<div class="panel log">
+<div class="log-head"><b>백엔드 B</b><code id="pane-b">:8002</code><span class="log-count b"><b id="cnt-b2">0</b> 처리</span></div>
+<pre id="log-b" class="log-body"></pre>
+</div>
+</div>
+</section>
+<p class="foot">어느 백엔드인지는 실제 응답 본문("나는 서버 A")으로 판단합니다. <code>./demo/web.sh</code>를 띄운 진짜 터미널에도 같은 <code>-&gt; 127.0.0.1:8001</code> 줄이 찍힙니다.</p>
+
+</main>
+</div>
+</div>
 <script src="app.js"></script>
 </body>
 </html>
