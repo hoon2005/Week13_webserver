@@ -4,8 +4,7 @@ make verify에는 들어가지 않습니다. wrk, ab(apache2-utils)가 있어야
 기본 설정으로 30분 정도 걸립니다.
 
 사용법:
-    make release
-    python3 tests/stress/load.py                 # 전부 (A 4종 -> B -> keepalive-off)
+    python3 tests/stress/load.py                 # 전부 (A 4종 -> B -> keepalive-off). release 빌드는 스크립트가 직접 최신화
     python3 tests/stress/load.py --quick         # 흐름만 확인 (3초, 1회, 워밍업 1초)
     python3 tests/stress/load.py static-small    # 하나만
     python3 tests/stress/load.py threads --sat-conns 32
@@ -522,9 +521,11 @@ def main():
     missing = [t for t in sorted(need) if shutil.which(t) is None]
     if missing:
         sys.exit("%s가 없습니다: sudo apt install wrk apache2-utils" % ", ".join(missing))
-    for prog in ("tiny", "adder"):
-        if not os.path.exists(os.path.join(RELEASE_DIR, prog)):
-            sys.exit("build/release/%s가 없습니다. 먼저 make release를 실행하세요" % prog)
+    # 소스가 바뀌었는데 예전 release 빌드로 재면 숫자가 틀림 (TCP_NODELAY가 없던 빌드는
+    # keep-alive 요청마다 44ms를 기다려 연결당 초당 23건에 묶였음). 매번 make로 최신화
+    built = subprocess.run(["make", "-C", REPO_ROOT, "release"], capture_output=True, text=True)
+    if built.returncode != 0:
+        sys.exit("make release 실패:\n" + built.stdout + built.stderr)
 
     started = datetime.datetime.now()
     out_dir = os.path.join(OUT_ROOT, started.strftime("%Y%m%d-%H%M%S"))
