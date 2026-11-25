@@ -1,0 +1,13 @@
+diff --git a/src/main/tiny.c b/src/main/tiny.c
+index ccdc907..445420f 100644
+--- a/src/main/tiny.c
++++ b/src/main/tiny.c
+@@ -1442,7 +1442,7 @@ static int cgi_serve(int fd, const struct http_request *req,
+     close(pipefd[0]);
+ 
+     if (result == CGI_TIMEOUT) {
+-        return error_reply(fd, req, 504, filename,
++        return error_reply(fd, req, 500, filename,
+                            "CGI program did not finish in time", keep);
+     }
+     if (result == CGI_FAILED) {
