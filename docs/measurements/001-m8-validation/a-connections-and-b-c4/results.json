@@ -1,0 +1,1014 @@
+{
+  "started": "2026-11-26T05:16:38",
+  "commit": "ac670ba",
+  "ncpu": 24,
+  "args": {
+    "duration": 10,
+    "warmup": 3,
+    "runs": 3,
+    "conns": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128,
+      256
+    ],
+    "threads_list": [
+      1,
+      4,
+      8,
+      16,
+      32
+    ],
+    "sat_conns": null,
+    "wrk_threads": 2,
+    "tool_timeout": 10,
+    "quick": false
+  },
+  "measurements": {
+    "static-small": {
+      "points": [
+        {
+          "rps": 30093.68,
+          "mib_per_sec": 6.71,
+          "p50": 0.029,
+          "p99": 0.136,
+          "errors": 0,
+          "server_cpu": 51.8,
+          "tool_cpu": 26.1,
+          "tool_threads": 1,
+          "conns": 1,
+          "rps_runs": [
+            30093.7,
+            29711.0,
+            30822.0
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 49314.33,
+          "mib_per_sec": 11.0,
+          "p50": 0.038,
+          "p99": 0.107,
+          "errors": 0,
+          "server_cpu": 101.0,
+          "tool_cpu": 51.6,
+          "tool_threads": 2,
+          "conns": 2,
+          "rps_runs": [
+            49764.5,
+            49092.3,
+            49314.3
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 79523.01,
+          "mib_per_sec": 17.74,
+          "p50": 0.043,
+          "p99": 0.131,
+          "errors": 0,
+          "server_cpu": 203.3,
+          "tool_cpu": 73.2,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            82089.7,
+            76801.8,
+            79523.0
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 71694.4,
+          "mib_per_sec": 16.0,
+          "p50": 0.096,
+          "p99": 0.325,
+          "errors": 0,
+          "server_cpu": 244.4,
+          "tool_cpu": 77.7,
+          "tool_threads": 2,
+          "conns": 8,
+          "rps_runs": [
+            71997.6,
+            68558.9,
+            71694.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 71231.23,
+          "mib_per_sec": 15.89,
+          "p50": 0.227,
+          "p99": 0.743,
+          "errors": 0,
+          "server_cpu": 247.1,
+          "tool_cpu": 72.1,
+          "tool_threads": 2,
+          "conns": 16,
+          "rps_runs": [
+            71231.2,
+            71190.6,
+            72164.8
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 71024.31,
+          "mib_per_sec": 15.85,
+          "p50": 0.338,
+          "p99": 22.81,
+          "errors": 0,
+          "server_cpu": 239.8,
+          "tool_cpu": 73.1,
+          "tool_threads": 2,
+          "conns": 32,
+          "rps_runs": [
+            73131.4,
+            69155.6,
+            71024.3
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 69023.43,
+          "mib_per_sec": 15.4,
+          "p50": 0.424,
+          "p99": 68.85,
+          "errors": 0,
+          "server_cpu": 237.1,
+          "tool_cpu": 71.6,
+          "tool_threads": 2,
+          "conns": 64,
+          "rps_runs": [
+            68960.4,
+            69925.9,
+            69023.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 70204.03,
+          "mib_per_sec": 15.66,
+          "p50": 0.46,
+          "p99": 157.21,
+          "errors": 0,
+          "server_cpu": 240.3,
+          "tool_cpu": 74.9,
+          "tool_threads": 2,
+          "conns": 128,
+          "rps_runs": [
+            71628.6,
+            68856.0,
+            70204.0
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 69582.99,
+          "mib_per_sec": 15.52,
+          "p50": 0.514,
+          "p99": 338.94,
+          "errors": 0,
+          "server_cpu": 238.4,
+          "tool_cpu": 69.4,
+          "tool_threads": 2,
+          "conns": 256,
+          "rps_runs": [
+            68335.9,
+            69583.0,
+            71374.6
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        }
+      ],
+      "stop_codes": [
+        0
+      ],
+      "saturation": 4,
+      "id": "load-a-static-small",
+      "desc": "작은 정적 파일 (home.html)",
+      "errors": 0,
+      "passed": true
+    },
+    "static-large": {
+      "points": [
+        {
+          "rps": 5427.22,
+          "mib_per_sec": 5427.2,
+          "p50": 0.184,
+          "p99": 0.349,
+          "errors": 0,
+          "server_cpu": 65.7,
+          "tool_cpu": 55.2,
+          "tool_threads": 1,
+          "conns": 1,
+          "rps_runs": [
+            5445.1,
+            5427.2,
+            5305.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 9711.92,
+          "mib_per_sec": 9717.76,
+          "p50": 0.203,
+          "p99": 0.377,
+          "errors": 0,
+          "server_cpu": 130.7,
+          "tool_cpu": 104.9,
+          "tool_threads": 2,
+          "conns": 2,
+          "rps_runs": [
+            9796.6,
+            9711.9,
+            9240.2
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 15442.99,
+          "mib_per_sec": 15441.92,
+          "p50": 0.231,
+          "p99": 0.467,
+          "errors": 0,
+          "server_cpu": 228.3,
+          "tool_cpu": 155.7,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            15594.9,
+            15443.0,
+            15206.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 18858.96,
+          "mib_per_sec": 18862.08,
+          "p50": 0.347,
+          "p99": 0.831,
+          "errors": 0,
+          "server_cpu": 312.2,
+          "tool_cpu": 182.1,
+          "tool_threads": 2,
+          "conns": 8,
+          "rps_runs": [
+            18859.0,
+            19462.0,
+            18228.4
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        },
+        {
+          "rps": 17196.0,
+          "mib_per_sec": 17203.2,
+          "p50": 0.801,
+          "p99": 1.66,
+          "errors": 0,
+          "server_cpu": 394.1,
+          "tool_cpu": 177.3,
+          "tool_threads": 2,
+          "conns": 16,
+          "rps_runs": [
+            17196.0,
+            15833.9,
+            17358.5
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 16452.82,
+          "mib_per_sec": 16455.68,
+          "p50": 1.03,
+          "p99": 98.56,
+          "errors": 0,
+          "server_cpu": 378.7,
+          "tool_cpu": 177.4,
+          "tool_threads": 2,
+          "conns": 32,
+          "rps_runs": [
+            16462.9,
+            15687.9,
+            16452.8
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 16896.72,
+          "mib_per_sec": 16896.0,
+          "p50": 1.13,
+          "p99": 291.33,
+          "errors": 0,
+          "server_cpu": 363.7,
+          "tool_cpu": 175.9,
+          "tool_threads": 2,
+          "conns": 64,
+          "rps_runs": [
+            17268.1,
+            16757.2,
+            16896.7
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 16804.26,
+          "mib_per_sec": 16803.84,
+          "p50": 1.29,
+          "p99": 667.3,
+          "errors": 0,
+          "server_cpu": 372.7,
+          "tool_cpu": 177.4,
+          "tool_threads": 2,
+          "conns": 128,
+          "rps_runs": [
+            17163.1,
+            15044.9,
+            16804.3
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 15128.51,
+          "mib_per_sec": 15134.72,
+          "p50": 1.42,
+          "p99": 1560.0,
+          "errors": 0,
+          "server_cpu": 336.6,
+          "tool_cpu": 167.4,
+          "tool_threads": 2,
+          "conns": 256,
+          "rps_runs": [
+            15794.0,
+            15128.5,
+            14215.0
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        }
+      ],
+      "stop_codes": [
+        0
+      ],
+      "id": "load-a-static-large",
+      "desc": "큰 정적 파일 (1 MiB)",
+      "errors": 0,
+      "passed": true
+    },
+    "cgi": {
+      "points": [
+        {
+          "rps": 1594.4,
+          "mib_per_sec": 0.33,
+          "p50": 0.577,
+          "p99": 5.18,
+          "errors": 0,
+          "server_cpu": 93.8,
+          "tool_cpu": 2.7,
+          "tool_threads": 1,
+          "conns": 1,
+          "rps_runs": [
+            1680.5,
+            1559.9,
+            1594.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 2733.14,
+          "mib_per_sec": 0.57,
+          "p50": 0.619,
+          "p99": 5.7,
+          "errors": 0,
+          "server_cpu": 175.8,
+          "tool_cpu": 5.1,
+          "tool_threads": 2,
+          "conns": 2,
+          "rps_runs": [
+            2732.7,
+            2767.1,
+            2733.1
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4162.65,
+          "mib_per_sec": 0.87,
+          "p50": 0.836,
+          "p99": 5.95,
+          "errors": 0,
+          "server_cpu": 311.2,
+          "tool_cpu": 8.7,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            4162.6,
+            4110.9,
+            4257.6
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4620.49,
+          "mib_per_sec": 0.96,
+          "p50": 1.61,
+          "p99": 6.78,
+          "errors": 0,
+          "server_cpu": 379.9,
+          "tool_cpu": 9.5,
+          "tool_threads": 2,
+          "conns": 8,
+          "rps_runs": [
+            4517.7,
+            4632.4,
+            4620.5
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4624.12,
+          "mib_per_sec": 0.97,
+          "p50": 3.31,
+          "p99": 8.54,
+          "errors": 0,
+          "server_cpu": 385.7,
+          "tool_cpu": 9.3,
+          "tool_threads": 2,
+          "conns": 16,
+          "rps_runs": [
+            4569.6,
+            4624.1,
+            4658.2
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4475.07,
+          "mib_per_sec": 0.93,
+          "p50": 3.54,
+          "p99": 357.35,
+          "errors": 0,
+          "server_cpu": 364.6,
+          "tool_cpu": 9.2,
+          "tool_threads": 2,
+          "conns": 32,
+          "rps_runs": [
+            4475.1,
+            4463.9,
+            4509.6
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4518.76,
+          "mib_per_sec": 0.94,
+          "p50": 3.73,
+          "p99": 1060.0,
+          "errors": 0,
+          "server_cpu": 375.9,
+          "tool_cpu": 9.3,
+          "tool_threads": 2,
+          "conns": 64,
+          "rps_runs": [
+            4525.2,
+            4517.9,
+            4518.8
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4544.21,
+          "mib_per_sec": 0.95,
+          "p50": 3.68,
+          "p99": 2410.0,
+          "errors": 0,
+          "server_cpu": 378.2,
+          "tool_cpu": 9.2,
+          "tool_threads": 2,
+          "conns": 128,
+          "rps_runs": [
+            4572.8,
+            4544.2,
+            4486.2
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 4476.31,
+          "mib_per_sec": 0.93,
+          "p50": 3.64,
+          "p99": 5120.0,
+          "errors": 0,
+          "server_cpu": 373.2,
+          "tool_cpu": 9.3,
+          "tool_threads": 2,
+          "conns": 256,
+          "rps_runs": [
+            4502.4,
+            4372.4,
+            4476.3
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        }
+      ],
+      "stop_codes": [
+        0
+      ],
+      "id": "load-a-cgi",
+      "desc": "CGI (/cgi-bin/adder?1&2)",
+      "errors": 0,
+      "passed": true
+    },
+    "proxy": {
+      "points": [
+        {
+          "rps": 9367.66,
+          "mib_per_sec": 2.09,
+          "p50": 0.102,
+          "p99": 0.238,
+          "errors": 0,
+          "server_cpu": 71.0,
+          "tool_cpu": 9.9,
+          "tool_threads": 1,
+          "conns": 1,
+          "rps_runs": [
+            9367.7,
+            9454.1,
+            9259.1
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 18898.66,
+          "mib_per_sec": 4.22,
+          "p50": 0.103,
+          "p99": 0.181,
+          "errors": 0,
+          "server_cpu": 146.8,
+          "tool_cpu": 20.5,
+          "tool_threads": 2,
+          "conns": 2,
+          "rps_runs": [
+            18584.4,
+            18932.7,
+            18898.7
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 35219.19,
+          "mib_per_sec": 7.86,
+          "p50": 0.108,
+          "p99": 0.169,
+          "errors": 0,
+          "server_cpu": 296.7,
+          "tool_cpu": 32.3,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            35219.2,
+            35148.7,
+            36444.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 52458.23,
+          "mib_per_sec": 11.7,
+          "p50": 0.143,
+          "p99": 0.223,
+          "errors": 0,
+          "server_cpu": 670.9,
+          "tool_cpu": 68.3,
+          "tool_threads": 2,
+          "conns": 8,
+          "rps_runs": [
+            52458.2,
+            52617.6,
+            49312.6
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 57045.7,
+          "mib_per_sec": 12.73,
+          "p50": 0.233,
+          "p99": 0.788,
+          "errors": 0,
+          "server_cpu": 1183.6,
+          "tool_cpu": 109.7,
+          "tool_threads": 2,
+          "conns": 16,
+          "rps_runs": [
+            57045.7,
+            57127.3,
+            56973.7
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 59400.63,
+          "mib_per_sec": 13.25,
+          "p50": 0.307,
+          "p99": 31.82,
+          "errors": 0,
+          "server_cpu": 1189.4,
+          "tool_cpu": 107.3,
+          "tool_threads": 2,
+          "conns": 32,
+          "rps_runs": [
+            59400.6,
+            59766.4,
+            55548.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 62574.99,
+          "mib_per_sec": 13.96,
+          "p50": 0.339,
+          "p99": 80.15,
+          "errors": 0,
+          "server_cpu": 1189.3,
+          "tool_cpu": 108.5,
+          "tool_threads": 2,
+          "conns": 64,
+          "rps_runs": [
+            62559.7,
+            62708.4,
+            62575.0
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 65349.21,
+          "mib_per_sec": 14.58,
+          "p50": 0.367,
+          "p99": 168.71,
+          "errors": 0,
+          "server_cpu": 1196.0,
+          "tool_cpu": 109.2,
+          "tool_threads": 2,
+          "conns": 128,
+          "rps_runs": [
+            65071.1,
+            65368.4,
+            65349.2
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 65333.77,
+          "mib_per_sec": 14.58,
+          "p50": 0.402,
+          "p99": 360.68,
+          "errors": 0,
+          "server_cpu": 1193.5,
+          "tool_cpu": 107.6,
+          "tool_threads": 2,
+          "conns": 256,
+          "rps_runs": [
+            65214.0,
+            65333.8,
+            65398.8
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        }
+      ],
+      "stop_codes": [
+        0,
+        0,
+        0
+      ],
+      "id": "load-a-proxy",
+      "desc": "중계 (/api -> 백엔드 2개)",
+      "errors": 0,
+      "passed": true
+    },
+    "threads": {
+      "points": [
+        {
+          "rps": 31801.65,
+          "mib_per_sec": 7.1,
+          "p50": 0.032,
+          "p99": 9.31,
+          "errors": 0,
+          "server_cpu": 54.5,
+          "tool_cpu": 27.4,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            30553.5,
+            31887.4,
+            31801.7
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 1
+        },
+        {
+          "rps": 81138.19,
+          "mib_per_sec": 18.1,
+          "p50": 0.043,
+          "p99": 0.128,
+          "errors": 0,
+          "server_cpu": 202.1,
+          "tool_cpu": 69.0,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            86233.5,
+            81138.2,
+            75733.1
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 4
+        },
+        {
+          "rps": 77639.91,
+          "mib_per_sec": 17.32,
+          "p50": 0.044,
+          "p99": 0.146,
+          "errors": 0,
+          "server_cpu": 195.5,
+          "tool_cpu": 69.3,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            80712.5,
+            77046.9,
+            77639.9
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 8
+        },
+        {
+          "rps": 80359.87,
+          "mib_per_sec": 17.93,
+          "p50": 0.042,
+          "p99": 0.153,
+          "errors": 0,
+          "server_cpu": 199.6,
+          "tool_cpu": 72.9,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            83201.2,
+            80102.4,
+            80359.9
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 16
+        },
+        {
+          "rps": 77232.19,
+          "mib_per_sec": 17.23,
+          "p50": 0.043,
+          "p99": 0.161,
+          "errors": 0,
+          "server_cpu": 200.9,
+          "tool_cpu": 71.6,
+          "tool_threads": 2,
+          "conns": 4,
+          "rps_runs": [
+            79483.0,
+            77232.2,
+            77081.0
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 32
+        }
+      ],
+      "stop_codes": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "conns": 4,
+      "id": "load-b-threads",
+      "desc": "작업 스레드 수 효과 (home.html, -c 4)",
+      "errors": 0,
+      "passed": true
+    },
+    "keepalive-off": {
+      "points": [
+        {
+          "rps": 13483.29,
+          "mib_per_sec": 2.94,
+          "p50": 0.0,
+          "p99": 0.0,
+          "errors": 0,
+          "server_cpu": 49.0,
+          "tool_cpu": 33.6,
+          "tool_threads": 1,
+          "conns": 1,
+          "rps_runs": [
+            13509.8,
+            13390.5,
+            13483.3
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 27602.79,
+          "mib_per_sec": 6.03,
+          "p50": 0.0,
+          "p99": 0.0,
+          "errors": 0,
+          "server_cpu": 104.0,
+          "tool_cpu": 57.9,
+          "tool_threads": 1,
+          "conns": 2,
+          "rps_runs": [
+            27568.9,
+            27602.8,
+            27988.8
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 43008.33,
+          "mib_per_sec": 9.39,
+          "p50": 0.0,
+          "p99": 0.0,
+          "errors": 0,
+          "server_cpu": 178.3,
+          "tool_cpu": 83.5,
+          "tool_threads": 1,
+          "conns": 4,
+          "rps_runs": [
+            43775.7,
+            43008.3,
+            40986.9
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        },
+        {
+          "rps": 52671.29,
+          "mib_per_sec": 11.5,
+          "p50": 0.0,
+          "p99": 0.0,
+          "errors": 0,
+          "server_cpu": 229.2,
+          "tool_cpu": 96.9,
+          "tool_threads": 1,
+          "conns": 8,
+          "rps_runs": [
+            52671.3,
+            52695.8,
+            52510.4
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        },
+        {
+          "rps": 51939.76,
+          "mib_per_sec": 11.34,
+          "p50": 0.0,
+          "p99": 1.0,
+          "errors": 0,
+          "server_cpu": 249.6,
+          "tool_cpu": 97.1,
+          "tool_threads": 1,
+          "conns": 16,
+          "rps_runs": [
+            51827.7,
+            51939.8,
+            52026.3
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        },
+        {
+          "rps": 56660.16,
+          "mib_per_sec": 12.37,
+          "p50": 1.0,
+          "p99": 1.0,
+          "errors": 0,
+          "server_cpu": 188.4,
+          "tool_cpu": 97.1,
+          "tool_threads": 1,
+          "conns": 32,
+          "rps_runs": [
+            56939.2,
+            56660.2,
+            56652.1
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        },
+        {
+          "rps": 56206.34,
+          "mib_per_sec": 12.28,
+          "p50": 1.0,
+          "p99": 1.0,
+          "errors": 0,
+          "server_cpu": 176.1,
+          "tool_cpu": 97.0,
+          "tool_threads": 1,
+          "conns": 64,
+          "rps_runs": [
+            56209.9,
+            56206.3,
+            55784.0
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        },
+        {
+          "rps": 58003.15,
+          "mib_per_sec": 12.67,
+          "p50": 2.0,
+          "p99": 3.0,
+          "errors": 0,
+          "server_cpu": 203.8,
+          "tool_cpu": 96.9,
+          "tool_threads": 1,
+          "conns": 128,
+          "rps_runs": [
+            58197.7,
+            57822.3,
+            58003.2
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        },
+        {
+          "rps": 57253.54,
+          "mib_per_sec": 12.5,
+          "p50": 4.0,
+          "p99": 5.0,
+          "errors": 0,
+          "server_cpu": 207.3,
+          "tool_cpu": 96.9,
+          "tool_threads": 1,
+          "conns": 256,
+          "rps_runs": [
+            57620.6,
+            57172.8,
+            57253.5
+          ],
+          "tool_limited": true,
+          "cpu_shared": false
+        }
+      ],
+      "stop_codes": [
+        0
+      ],
+      "saturation": 32,
+      "id": "load-keepalive-off",
+      "desc": "연결 유지 끔 (ab, -k 없음, home.html)",
+      "errors": 0,
+      "passed": true
+    }
+  }
+}
