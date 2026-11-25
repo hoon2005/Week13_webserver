@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from m6m7_test import (  # noqa: E402
@@ -90,21 +91,102 @@ class StaticTest(unittest.TestCase):
                     self.assertEqual(headers["connection"], "keep-alive")
             self.assertEqual(get_on(f, sock, "/home.html")[0], 200)
 
-    def test_static_percent_path(self):
-        """static-percent-path: 퍼센트 인코딩된 경로 (지금은 디코딩하지 않음)
-
-        디코딩 여부는 팀 결정 전이라 지금 동작(404)을 기록함. 디코딩하기로 정하면
-        기대값을 200으로 바꿈.
-        """
-        self.assertEqual(self.server.get("/crying_cat.jpg")[0], 200)
-        self.assertEqual(self.server.get("/crying%5Fcat.jpg")[0], 404)
-
     def test_cgi_dir_missing(self):
         """cgi-dir-missing: CGI 폴더 자체와 없는 CGI를 GET하면 403, 404이고 서버가 유지되는지"""
         self.assertEqual(self.server.get("/cgi-bin/")[0], 403)
         self.assertEqual(self.server.get("/cgi-bin/nope")[0], 404)
         self.assertIsNone(self.server.proc.poll())
         self.assertEqual(self.server.get("/home.html")[0], 200)
+
+
+class PercentPathTest(unittest.TestCase):
+    """static-percent-path: 경로의 퍼센트 인코딩을 한 번만 풀고, 푼 뒤에 다시 검사하는지
+
+    규칙 (tiny.c uri_path_decode)
+      %XX는 한 번만 풂. 잘못된 표기와 제어 문자는 400, 인코딩된 '/'(%2F)는 404
+      푼 경로에 "..", "." 조각이 있으면 403
+      쿼리는 풀지 않음. 중계 요청은 원래 URI를 그대로 넘김
+    """
+
+    KOREAN = "내 사진.jpg"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+        www = cls.server.www
+        cls.files = {"crying_cat.jpg": b"\xff\xd8cat", cls.KOREAN: b"\xff\xd8korean",
+                     "a?b.html": b"<p>question</p>", "%2e%2e": b"literal"}
+        for name, data in cls.files.items():
+            with open(os.path.join(www, name), "wb") as f:
+                f.write(data)
+        os.makedirs(os.path.join(www, "docs"))
+        with open(os.path.join(www, "docs", "index.html"), "w") as f:
+            f.write("<p>docs</p>")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_encoded_names_are_found(self):
+        """인코딩된 이름이 실제 파일로 풀림 (한글, 공백, '?', '_', '.')"""
+        cases = (
+            ("/crying%5Fcat.jpg", "crying_cat.jpg"),
+            ("/" + urllib.parse.quote(self.KOREAN), self.KOREAN),
+            ("/a%3Fb.html", "a?b.html"),          # %3F는 쿼리 시작이 아니라 이름의 일부
+            ("/%252e%252e", "%2e%2e"),            # 한 번만 풀어서 "%2e%2e"라는 이름
+        )
+        for path, name in cases:
+            with self.subTest(path=path):
+                status, _, body = self.server.get(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(body, self.files[name])
+        status, headers, _ = self.server.get("/home%2Ehtml?v=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "text/html")
+
+    def test_decoded_dot_segments_are_403(self):
+        """풀고 나서 ".."이나 "."이 되는 조각은 403 (풀기 전 검사를 피하지 못함)"""
+        for path in ("/%2e%2e/etc/passwd", "/docs/%2E%2E/home.html",
+                     "/docs/.%2e/home.html", "/%2e/home.html"):
+            with self.subTest(path=path):
+                self.assertEqual(self.server.get(path)[0], 403)
+
+    def test_bad_encodings_are_400_and_connection_survives(self):
+        """잘못된 %와 제어 문자는 400, 인코딩된 '/'는 404. 서버와 연결은 유지"""
+        cases = (("/home%G1.html", 400), ("/home.html%", 400), ("/home.html%2", 400),
+                 ("/home.html%00.jpg", 400), ("/a%0Ab", 400), ("/a%7Fb", 400),
+                 ("/docs%2Findex.html", 404), ("/docs%2findex.html", 404))
+        with self.server.connect() as sock:
+            f = sock.makefile("rb")
+            for path, expected in cases:
+                with self.subTest(path=path):
+                    self.assertEqual(get_on(f, sock, path)[0], expected)
+            self.assertEqual(get_on(f, sock, "/home.html")[0], 200)
+        self.assertIsNone(self.server.proc.poll())
+
+    def test_cgi_path_decoded_but_query_kept(self):
+        """CGI 경로도 풀어서 찾고, QUERY_STRING은 인코딩된 채로 넘김"""
+        status, _, body = self.server.get("/cgi%2Dbin/adder?1&2")
+        self.assertEqual(status, 200)
+        self.assertIn(b"1 + 2 = 3", body)
+        status, _, body = self.server.get("/cgi-bin/query?a%20b%2Fc")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"a%20b%2Fc")
+
+
+class PercentProxyTest(unittest.TestCase):
+    def test_proxy_forwards_encoded_uri_as_is(self):
+        """static-percent-path: 중계 요청은 풀지 않고 받은 URI 그대로 백엔드에 넘김"""
+        backend = Backend()
+        server = Server("--route", "/api=%s:%d" % (HOST, backend.port))
+        try:
+            for path in ("/api/%EB%82%B4%20a.html?q=%2F", "/api/%2e%2e/x"):
+                with self.subTest(path=path):
+                    self.assertEqual(server.get(path)[0], 200)
+                    self.assertEqual(backend.requests[-1]["path"], path)
+        finally:
+            server.stop()
+            backend.close()
 
 
 class RestartTest(unittest.TestCase):

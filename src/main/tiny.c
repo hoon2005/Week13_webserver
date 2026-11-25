@@ -759,6 +759,7 @@ static int proxy_handle(int fd, struct http_request *req,
                         struct proxy_route *route, const char *client_ip,
                         int *keep);
 static int uri_path_is_clean(const char *uri);
+static int uri_segments_are_clean(const char *path, size_t len);
 
 /*
  * 연결 하나를 처리합니다 (m4m5.md 5.1).
@@ -1011,21 +1012,30 @@ static int proxy_handle(int fd, struct http_request *req,
 static int uri_path_is_clean(const char *uri)
 {
     const char *q = strchr(uri, '?');
-    size_t len = q ? (size_t)(q - uri) : strlen(uri);
+
+    return uri_segments_are_clean(uri, q ? (size_t)(q - uri) : strlen(uri));
+}
+
+/*
+ * 경로 len바이트를 '/'로 나눠 검사. '?'를 경로 끝으로 보지 않음:
+ * 디코딩한 경로에서는 '?'가 %3F에서 나온 파일 이름의 일부이기 때문 (static-percent-path)
+ */
+static int uri_segments_are_clean(const char *path, size_t len)
+{
     size_t start = 1;
 
     for (size_t i = 1; i <= len; i++) {
-        if (i < len && uri[i] != '/') {
+        if (i < len && path[i] != '/') {
             continue;
         }
         size_t seg = i - start;
         if (seg == 0 && i < len) {
             return 0; /* "//" */
         }
-        if (seg == 1 && uri[start] == '.') {
+        if (seg == 1 && path[start] == '.') {
             return 0; /* "/./" */
         }
-        if (seg == 2 && uri[start] == '.' && uri[start + 1] == '.') {
+        if (seg == 2 && path[start] == '.' && path[start + 1] == '.') {
             return 0; /* "/../" */
         }
         start = i + 1;
@@ -1035,7 +1045,11 @@ static int uri_path_is_clean(const char *uri)
 
 /* ============================== M2: 경로 확인 (Phase 1에서 이어짐) ============================== */
 
-static int uri_parse(const char *uri, char *filename, char *cgiargs);
+enum uri_decode { DECODE_OK, DECODE_BAD, DECODE_SLASH, DECODE_LONG };
+
+static enum uri_decode uri_path_decode(const char *uri, char *path, size_t cap);
+static int uri_parse(const char *path, const char *query, char *filename,
+                     char *cgiargs);
 static int static_serve(int fd, const struct http_request *req,
                         const char *filename, off_t filesize, int *keep);
 static int cgi_serve(int fd, const struct http_request *req,
@@ -1047,11 +1061,32 @@ static int cgi_serve(int fd, const struct http_request *req,
  */
 static int request_route(int fd, struct http_request *req, int *keep)
 {
-    char filename[MAXLINE], cgiargs[MAXLINE];
+    char path[MAXLINE], filename[MAXLINE], cgiargs[MAXLINE];
+    const char *query = strchr(req->uri, '?');
     struct stat sbuf;
     int is_static;
 
-    is_static = uri_parse(req->uri, filename, cgiargs);
+    /* 퍼센트 디코딩은 직접 처리하는 요청에만. 중계는 원래 URI를 그대로 넘김 */
+    switch (uri_path_decode(req->uri, path, sizeof(path))) {
+    case DECODE_BAD:
+        return error_reply(fd, req, 400, req->uri,
+                           "Bad percent-encoding in the path", keep);
+    case DECODE_SLASH:
+        return error_reply(fd, req, 404, req->uri,
+                           "Tiny doesn't accept an encoded slash", keep);
+    case DECODE_LONG:
+        *keep = 0;
+        return error_reply(fd, req, 414, req->uri, "Path too long", keep);
+    default:
+        break;
+    }
+    /* 6단계 검사는 디코딩 전 URI였으므로 %2e%2e 같은 것을 여기서 다시 막음 */
+    if (!uri_segments_are_clean(path, strlen(path))) {
+        return error_reply(fd, req, 403, req->uri,
+                           "Tiny doesn't serve this path", keep);
+    }
+
+    is_static = uri_parse(path, query ? query + 1 : NULL, filename, cgiargs);
     if (is_static < 0) {
         *keep = 0;
         return error_reply(fd, req, 414, req->uri, "Path too long", keep);
@@ -1087,37 +1122,97 @@ static int request_route(int fd, struct http_request *req, int *keep)
     return cgi_serve(fd, req, filename, cgiargs, keep);
 }
 
-/*
- * URI를 정적/동적으로 나누고 파일 경로와 CGI 인자를 만듭니다.
- * 정적 1, 동적 0, 경로가 버퍼보다 길면 -1. URI는 바꾸지 않음 (로그에 원본 유지).
- *   '?' 앞이 경로, 뒤가 쿼리. 라우팅(M6-6)과 경로 검사(M6-7)와 같은 기준 (F9)
- *   경로의 첫 조각이 cgi-bin일 때만 CGI. "/docs/cgi-bin-notes.html"이나
- *   "/home.html?x=cgi-bin"은 정적 파일
- *   정적 파일은 쿼리를 떼고 찾음: "/style.css?v=2" → ./style.css
- */
-static int uri_parse(const char *uri, char *filename, char *cgiargs)
+static int hex_value(char c)
 {
-    const char *question = strchr(uri, '?');
-    size_t path_len = question ? (size_t)(question - uri) : strlen(uri);
-    int is_cgi = path_len >= 8 && strncmp(uri, "/cgi-bin", 8) == 0 &&
-                 (path_len == 8 || uri[8] == '/');
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/*
+ * URI의 '?' 앞 경로에서 %XX를 풀어 path에 씀 (static-percent-path).
+ * 브라우저는 공백, 한글 파일 이름을 인코딩해서 보내므로 풀어야 파일을 찾음.
+ *   딱 한 번만 풂: "%252e"는 "%2e"라는 글자가 되고 다시 풀리지 않음.
+ *     두 번 풀면 "%252e%252e"가 ".."이 되어 경로 검사를 피함
+ *   잘못된 표기("%G1", 끝에 남은 "%")와 제어 문자(%00~%1F, %7F)는 DECODE_BAD (400).
+ *     %00은 C 문자열을 거기서 끊어 다른 파일을 열게 만듦
+ *   %2F는 DECODE_SLASH (404): 인코딩된 '/'로 경로 조각 경계를 숨기지 못하게
+ *     (Apache 기본값 AllowEncodedSlashes Off와 같음)
+ *   '+'는 공백으로 바꾸지 않음 (폼 인코딩 규칙이라 경로에는 해당 없음)
+ *   쿼리는 풀지 않음: CGI의 QUERY_STRING은 인코딩된 채로 넘기는 것이 규약
+ */
+static enum uri_decode uri_path_decode(const char *uri, char *path, size_t cap)
+{
+    const char *q = strchr(uri, '?');
+    size_t len = q ? (size_t)(q - uri) : strlen(uri);
+    size_t j = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)uri[i];
+
+        if (c == '%') {
+            int hi, lo;
+
+            if (len - i < 3) {
+                return DECODE_BAD;
+            }
+            hi = hex_value(uri[i + 1]);
+            lo = hex_value(uri[i + 2]);
+            if (hi < 0 || lo < 0) {
+                return DECODE_BAD;
+            }
+            c = (unsigned char)(hi * 16 + lo);
+            i += 2;
+            if (c == '/') {
+                return DECODE_SLASH;
+            }
+            if (c < 0x20 || c == 0x7f) {
+                return DECODE_BAD;
+            }
+        }
+        if (j + 1 >= cap) {
+            return DECODE_LONG;
+        }
+        path[j++] = (char)c;
+    }
+    path[j] = '\0';
+    return DECODE_OK;
+}
+
+/*
+ * 디코딩한 경로와 쿼리로 정적/동적을 나누고 파일 경로와 CGI 인자를 만듭니다.
+ * 정적 1, 동적 0, 경로가 버퍼보다 길면 -1. query는 '?' 뒤 (없으면 NULL).
+ *   경로는 이미 '?'에서 잘린 것이라 다시 '?'로 자르지 않음 (%3F는 파일 이름의 일부)
+ *   경로의 첫 조각이 cgi-bin일 때만 CGI. "/docs/cgi-bin-notes.html"이나
+ *   "/home.html?x=cgi-bin"은 정적 파일 (F9)
+ *   정적 파일은 쿼리를 무시: "/style.css?v=2" → ./style.css
+ */
+static int uri_parse(const char *path, const char *query, char *filename,
+                     char *cgiargs)
+{
+    size_t path_len = strlen(path);
+    int is_cgi = path_len >= 8 && strncmp(path, "/cgi-bin", 8) == 0 &&
+                 (path_len == 8 || path[8] == '/');
     int n;
 
     if (!is_cgi) {
         cgiargs[0] = '\0';
-        n = snprintf(filename, MAXLINE, ".%.*s%s", (int)path_len, uri,
-                     uri[path_len - 1] == '/' ? "home.html" : "");
+        n = snprintf(filename, MAXLINE, ".%s%s", path,
+                     path[path_len - 1] == '/' ? "home.html" : "");
         return (n < 0 || n >= MAXLINE) ? -1 : 1;
     }
-    if (question) {
-        n = snprintf(cgiargs, MAXLINE, "%s", question + 1);
-        if (n < 0 || n >= MAXLINE) {
-            return -1;
-        }
-    } else {
-        cgiargs[0] = '\0';
+    n = snprintf(cgiargs, MAXLINE, "%s", query ? query : "");
+    if (n < 0 || n >= MAXLINE) {
+        return -1;
     }
-    n = snprintf(filename, MAXLINE, ".%.*s", (int)path_len, uri);
+    n = snprintf(filename, MAXLINE, ".%s", path);
     return (n < 0 || n >= MAXLINE) ? -1 : 0;
 }
 
