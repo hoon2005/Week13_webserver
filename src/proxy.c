@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -496,11 +497,12 @@ int proxy_response_parse(const char *head, size_t len, int head_request,
         }
     }
 
-    if (head_request || res->status == 304) {
-        res->body = PROXY_BODY_NONE; /* 길이는 있으면 그대로 알려 줌 */
-    } else if (res->status == 204) {
+    /* 204를 HEAD보다 먼저 봄: 두 규칙이 겹치면 204가 우선 (F4, RFC 9110 8.6) */
+    if (res->status == 204) {
         res->body = PROXY_BODY_NONE;
         res->has_length = 0; /* 204에는 Content-Length를 보내지 않음 */
+    } else if (head_request || res->status == 304) {
+        res->body = PROXY_BODY_NONE; /* 길이는 있으면 그대로 알려 줌 */
     } else if (res->has_length) {
         res->body = PROXY_BODY_LENGTH;
     } else {
@@ -595,11 +597,14 @@ static int backend_connect(const struct proxy_backend *b, long wait_ms)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     int err = 0;
     socklen_t elen = sizeof(err);
+    int one = 1;
     int r;
 
     if (fd < 0) {
         return -3;
     }
+    /* 요청 헤더와 POST 본문을 나눠 쓰므로 백엔드 쪽에도 Nagle 지연을 끔 (F1) */
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     /* CGI 자식이 물려받지 않게 함. fork와의 틈은 CGI 자식이 fd를 모두 닫아서 막음 */
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {

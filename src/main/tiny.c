@@ -28,6 +28,7 @@
 #include "http.h"
 #include "proxy.h"
 
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdatomic.h>
 #include <strings.h>
@@ -49,14 +50,14 @@ int accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
 struct server_config {
     const char *port;
     int port_num;
-    const char *root;    /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
-    int threads;         /* 작업자 수 */
-    int queue;           /* 작업 큐 크기 */
-    int timeout;         /* 읽기 타임아웃(초). 쓰기는 2배 */
-    int keepalive_max;   /* 연결당 요청 수 상한 */
-    int proxy_timeout;   /* 백엔드 응답 헤더까지 합계, 본문 데이터 간격(초) */
-    long open_max;       /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
-    char path_env[1024]; /* CGI에 넘길 PATH=... */
+    const char *root;  /* NULL이면 현재 폴더 (Phase 1 동작 유지) */
+    int threads;       /* 작업자 수 */
+    int queue;         /* 작업 큐 크기 */
+    int timeout;       /* 읽기 타임아웃(초). 쓰기는 2배 */
+    int keepalive_max; /* 연결당 요청 수 상한 */
+    int proxy_timeout; /* 백엔드 응답 헤더까지 합계, 본문 데이터 간격(초) */
+    long open_max;     /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
+    char *path_env;    /* CGI에 넘길 PATH=... (시작할 때 길이만큼 할당, F6) */
 };
 
 static struct server_config cfg = {
@@ -113,7 +114,8 @@ static void config_parse(int argc, char **argv)
     if (argc < 2 || strncmp(argv[1], "--", 2) == 0) {
         usage(argv[0]);
     }
-    cfg.port = argv[1]; /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
+    cfg.port =
+        argv[1]; /* 첫 번째 인자는 지금처럼 포트 (기존 기능 테스트 유지) */
     cfg.port_num = positive_int_arg(argv[0], argv[1]);
     if (cfg.port_num > 65535) {
         usage(argv[0]);
@@ -190,9 +192,18 @@ int main(int argc, char **argv)
     if (cfg.open_max <= 0 || cfg.open_max > 65536) {
         cfg.open_max = 65536;
     }
+    /* 서버의 PATH를 자르지 않고 넘김. fork 전에 한 번만 할당해서 자식은 할당하지 않음 */
     path = getenv("PATH");
-    snprintf(cfg.path_env, sizeof(cfg.path_env), "PATH=%s",
-             path ? path : "/usr/bin:/bin");
+    if (path == NULL) {
+        path = "/usr/bin:/bin";
+    }
+    cfg.path_env = malloc(strlen("PATH=") + strlen(path) + 1);
+    if (cfg.path_env == NULL) {
+        fprintf(stderr, "PATH를 준비하지 못했습니다\n");
+        exit(1);
+    }
+    strcpy(cfg.path_env, "PATH=");
+    strcat(cfg.path_env, path);
 
     /* 다른 스레드를 만들기 전에 막음. 새 스레드는 이 설정을 물려받고,
      * 시그널은 시그널 스레드의 sigwait로만 받음 (M7-5) */
@@ -254,6 +265,7 @@ int main(int argc, char **argv)
 
     conn_queue_destroy(&queue);
     free(workers);
+    free(cfg.path_env);
     close(wake_pipe[0]);
     close(wake_pipe[1]);
     printf("종료 완료\n");
@@ -269,8 +281,7 @@ int main(int argc, char **argv)
 static void accept_loop(int listenfd, struct conn_queue *queue)
 {
     while (1) {
-        struct pollfd p[2] = {{wake_pipe[0], POLLIN, 0},
-                              {listenfd, POLLIN, 0}};
+        struct pollfd p[2] = {{wake_pipe[0], POLLIN, 0}, {listenfd, POLLIN, 0}};
         int connfd;
 
         if (poll(p, 2, -1) < 0) {
@@ -291,7 +302,8 @@ static void accept_loop(int listenfd, struct conn_queue *queue)
             if (errno == EMFILE || errno == ENFILE) {
                 perror("accept");
                 struct timespec ts = {0, 10 * 1000 * 1000};
-                nanosleep(&ts, NULL); /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
+                nanosleep(&ts,
+                          NULL); /* fd가 모자라면 잠깐 쉬어 바쁜 반복을 막음 */
             } else if (errno != EAGAIN && errno != EWOULDBLOCK &&
                        errno != EINTR && errno != ECONNABORTED) {
                 perror("accept");
@@ -424,16 +436,21 @@ static int accept_cloexec(int listenfd)
  *   블로킹으로 되돌림: macOS는 리스닝 소켓의 논블로킹 설정을 물려줌 (M7-6)
  *   쓰기 타임아웃(--timeout의 2배): 응답을 받아 가지 않는 손님 (m4m5.md 2.4)
  *   읽기는 poll로 마감을 지키므로 SO_RCVTIMEO를 쓰지 않음 (M7-4)
+ *   TCP_NODELAY: 헤더와 본문을 write 두 번에 나눠 보내므로, Nagle이 작은 본문을
+ *   헤더의 ACK까지 붙잡고 클라이언트는 ACK를 늦게 보내(Delayed ACK) keep-alive의
+ *   두 번째 요청부터 약 40ms씩 늦어짐 (F1, RFC 1122 4.2.3.2, 4.2.3.4)
  */
 static void conn_socket_setup(int connfd)
 {
     struct timeval snd = {cfg.timeout * 2, 0};
     int flags = fcntl(connfd, F_GETFL);
+    int one = 1;
 
     if (flags >= 0 && (flags & O_NONBLOCK)) {
         fcntl(connfd, F_SETFL, flags & ~O_NONBLOCK);
     }
     setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+    setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
 /* ============================== M7-4: 요청 수신 마감 ============================== */
@@ -564,6 +581,16 @@ static ssize_t reader_readn(struct conn_reader *r, char *usrbuf, size_t len,
 
 /* ============================== 응답 쓰기 ============================== */
 
+/*
+ * keep 값: 1 연결 유지, 0 응답 뒤 닫음, KEEP_SEND_FAILED 응답을 보내다 실패.
+ * 보내다 실패하면 지킬 응답이 없으므로 남은 데이터를 비우지 않고 바로 닫음
+ * (F2, m4m5.md "응답을 보내다 실패 → 바로 닫음")
+ */
+#define KEEP_SEND_FAILED (-1)
+
+/* response_head_send의 length로 주면 Content-Length 줄을 쓰지 않음 (204, 304) */
+#define NO_CONTENT_LENGTH ((size_t)-1)
+
 static int write_all(int fd, const void *buf, size_t n)
 {
     return rio_writen(fd, (void *)buf, n) == (ssize_t)n ? 0 : -1;
@@ -575,6 +602,7 @@ static int write_all(int fd, const void *buf, size_t n)
  *   content_type이 NULL이면 Content-Type 줄을 쓰지 않음 (CGI는 extra에 들어 있음).
  *   extra: "이름: 값\r\n" 형식의 추가 헤더 (없으면 NULL)
  *   종료가 시작됐으면 Connection: close로 보내고 *keep을 0으로 (M7-7)
+ *   length가 NO_CONTENT_LENGTH면 Content-Length 줄을 쓰지 않음 (204, 304)
  */
 static int response_head_send(int fd, int status, const char *reason,
                               const char *content_type, const char *extra,
@@ -582,6 +610,7 @@ static int response_head_send(int fd, int status, const char *reason,
 {
     char header[MAXBUF * 2];
     char type_line[HTTP_FIELD_MAX + 32] = "";
+    char length_line[64] = "";
     int n;
 
     if (atomic_load(&stopping)) {
@@ -591,34 +620,82 @@ static int response_head_send(int fd, int status, const char *reason,
         snprintf(type_line, sizeof(type_line), "Content-Type: %s\r\n",
                  content_type);
     }
+    if (length != NO_CONTENT_LENGTH) {
+        snprintf(length_line, sizeof(length_line), "Content-Length: %zu\r\n",
+                 length);
+    }
     n = snprintf(header, sizeof(header),
                  "HTTP/1.1 %d %s\r\n"
                  "Server: Tiny Web Server\r\n"
-                 "%s%s"
-                 "Content-Length: %zu\r\n"
+                 "%s%s%s"
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
-                 extra ? extra : "", length, *keep ? "keep-alive" : "close");
+                 extra ? extra : "", length_line,
+                 *keep > 0 ? "keep-alive" : "close");
     if (n < 0 || n >= (int)sizeof(header) ||
         write_all(fd, header, (size_t)n) < 0) {
-        *keep = 0;
+        *keep = KEEP_SEND_FAILED;
         return -1;
     }
     return 0;
 }
 
 /*
- * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
- * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 0으로.
- * extra: 추가 헤더 (405의 Allow 등, 없으면 NULL). 보낸 상태 코드를 돌려줌.
+ * 요청에서 온 글자를 HTML에 넣을 수 있게 바꿈: < > & " (F3, 반사형 XSS 방지).
+ * 결과가 out에 다 들어가지 않으면 들어가는 데까지만 씀 (항상 NUL로 끝남).
  */
-static int error_reply_extra(int fd, const struct http_request *req,
-                             int status, const char *extra, const char *cause,
+static void html_escape(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+
+    for (; *in != '\0'; in++) {
+        const char *rep;
+        char one[2] = {*in, '\0'};
+        size_t len;
+
+        switch (*in) {
+        case '<':
+            rep = "&lt;";
+            break;
+        case '>':
+            rep = "&gt;";
+            break;
+        case '&':
+            rep = "&amp;";
+            break;
+        case '"':
+            rep = "&quot;";
+            break;
+        default:
+            rep = one;
+            break;
+        }
+        len = strlen(rep);
+        if (n + len >= cap) {
+            break;
+        }
+        memcpy(out + n, rep, len);
+        n += len;
+    }
+    out[n] = '\0';
+}
+
+/*
+ * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
+ * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 KEEP_SEND_FAILED로.
+ * extra: 추가 헤더 (405의 Allow 등, 없으면 NULL). 보낸 상태 코드를 돌려줌.
+ * cause는 요청에서 온 글자라 HTML 특수문자를 바꿔서 넣음 (F3).
+ */
+static int error_reply_extra(int fd, const struct http_request *req, int status,
+                             const char *extra, const char *cause,
                              const char *longmsg, int *keep)
 {
     char body[MAXBUF];
+    char safe_cause[MAXBUF];
     int body_len;
     int send_body = !(req != NULL && strcmp(req->method, "HEAD") == 0);
+
+    html_escape(cause, safe_cause, sizeof(safe_cause));
 
     body_len = snprintf(body, sizeof(body),
                         "<html><title>Tiny Error</title>"
@@ -626,14 +703,14 @@ static int error_reply_extra(int fd, const struct http_request *req,
                         "%d: %s\r\n"
                         "<p>%s: %s\r\n"
                         "<hr><em>The Tiny Web server</em>\r\n",
-                        status, http_status_text(status), longmsg, cause);
+                        status, http_status_text(status), longmsg, safe_cause);
     if (body_len >= (int)sizeof(body)) {
         body_len = sizeof(body) - 1;
     }
     if (response_head_send(fd, status, NULL, "text/html", extra,
                            (size_t)body_len, keep) < 0 ||
         (send_body && write_all(fd, body, (size_t)body_len) < 0)) {
-        *keep = 0;
+        *keep = KEEP_SEND_FAILED;
     }
     return status;
 }
@@ -658,19 +735,31 @@ static void request_log(const struct http_request *req, int status,
 
 /* request_handle의 결과: 연결을 어떻게 할지 */
 enum conn_next {
-    CONN_CLOSE_SILENT = 0,  /* 응답 없이 바로 닫음 (끊김, 마감, 본문 도중 실패) */
-    CONN_KEEP = 1,          /* 다음 요청을 기다림 */
-    CONN_CLOSE_REPLIED = 2, /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
-    CONN_CLOSE_RESET = 3    /* RST로 닫음: 길이 없는 프록시 응답이 잘림 (M6-13) */
+    CONN_CLOSE_SILENT =
+        0,         /* 바로 닫음 (끊김, 마감, 본문 도중 실패, 응답 전송 실패) */
+    CONN_KEEP = 1, /* 다음 요청을 기다림 */
+    CONN_CLOSE_REPLIED =
+        2,               /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
+    CONN_CLOSE_RESET = 3 /* RST로 닫음: 길이 없는 프록시 응답이 잘림 (M6-13) */
 };
 
 static int request_handle(int fd, struct conn_reader *r, int can_keep,
                           int watch_wake, const char *client_ip);
+
+/* 응답을 보낸 뒤의 keep 값을 연결 처리로 바꿈 (F2) */
+static int conn_after(int keep)
+{
+    if (keep > 0) {
+        return CONN_KEEP;
+    }
+    return keep < 0 ? CONN_CLOSE_SILENT : CONN_CLOSE_REPLIED;
+}
 static int request_route(int fd, struct http_request *req, int *keep);
 static int proxy_handle(int fd, struct http_request *req,
                         struct proxy_route *route, const char *client_ip,
                         int *keep);
 static int uri_path_is_clean(const char *uri);
+static int uri_segments_are_clean(const char *path, size_t len);
 
 /*
  * 연결 하나를 처리합니다 (m4m5.md 5.1).
@@ -694,8 +783,8 @@ static int serve_connection(int connfd)
     }
     reader_init(&r, connfd);
     for (int n = 1;; n++) {
-        next = request_handle(connfd, &r, n < cfg.keepalive_max, n > 1,
-                              client_ip);
+        next =
+            request_handle(connfd, &r, n < cfg.keepalive_max, n > 1, client_ip);
         if (next != CONN_KEEP) {
             break;
         }
@@ -801,7 +890,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
         error_reply(fd, &req, status, "request line", "Bad request line",
                     &keep);
         request_log(&req, status, NULL);
-        return CONN_CLOSE_REPLIED;
+        return conn_after(keep);
     }
 
     /* 2. 헤더: 빈 줄까지 "이름: 값" → 구조체 + 원본 블록 */
@@ -817,7 +906,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
         if (status != 0) {
             error_reply(fd, &req, status, "header", "Bad header", &keep);
             request_log(&req, status, NULL);
-            return CONN_CLOSE_REPLIED;
+            return conn_after(keep);
         }
     }
 
@@ -826,7 +915,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
     if (status != 0) {
         error_reply(fd, &req, status, req.uri, "Request rejected", &keep);
         request_log(&req, status, NULL);
-        return CONN_CLOSE_REPLIED;
+        return conn_after(keep);
     }
     keep = req.keep_alive && can_keep;
     body_len = http_body_length(&req);
@@ -847,7 +936,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
             keep = 0;
             error_reply(fd, &req, 500, req.uri, "Out of memory", &keep);
             request_log(&req, 500, NULL);
-            return CONN_CLOSE_REPLIED;
+            return conn_after(keep);
         }
         n = reader_readn(r, req.body, (size_t)body_len, deadline);
         if (n != (ssize_t)body_len) { /* 도중에 끊김, 마감: 응답 없이 닫음 */
@@ -863,7 +952,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
                              "Tiny doesn't serve this path", &keep);
         request_log(&req, status, NULL);
         http_request_free(&req);
-        return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        return conn_after(keep);
     }
 
     /* 7. 라우팅: 규칙에 걸리면 백엔드로, 아니면 직접 처리 (M6-2, M6-6) */
@@ -876,7 +965,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
     status = request_route(fd, &req, &keep);
     request_log(&req, status, NULL);
     http_request_free(&req);
-    return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+    return conn_after(keep);
 }
 
 /*
@@ -900,10 +989,10 @@ static int proxy_handle(int fd, struct http_request *req,
                     status == 504 ? "Backend did not respond in time"
                                   : "Backend failed",
                     keep);
-        next = *keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        next = conn_after(*keep);
         break;
     case PROXY_REPLIED:
-        next = *keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        next = conn_after(*keep);
         break;
     case PROXY_RESET:
         next = CONN_CLOSE_RESET;
@@ -923,21 +1012,30 @@ static int proxy_handle(int fd, struct http_request *req,
 static int uri_path_is_clean(const char *uri)
 {
     const char *q = strchr(uri, '?');
-    size_t len = q ? (size_t)(q - uri) : strlen(uri);
+
+    return uri_segments_are_clean(uri, q ? (size_t)(q - uri) : strlen(uri));
+}
+
+/*
+ * 경로 len바이트를 '/'로 나눠 검사. '?'를 경로 끝으로 보지 않음:
+ * 디코딩한 경로에서는 '?'가 %3F에서 나온 파일 이름의 일부이기 때문 (static-percent-path)
+ */
+static int uri_segments_are_clean(const char *path, size_t len)
+{
     size_t start = 1;
 
     for (size_t i = 1; i <= len; i++) {
-        if (i < len && uri[i] != '/') {
+        if (i < len && path[i] != '/') {
             continue;
         }
         size_t seg = i - start;
         if (seg == 0 && i < len) {
             return 0; /* "//" */
         }
-        if (seg == 1 && uri[start] == '.') {
+        if (seg == 1 && path[start] == '.') {
             return 0; /* "/./" */
         }
-        if (seg == 2 && uri[start] == '.' && uri[start + 1] == '.') {
+        if (seg == 2 && path[start] == '.' && path[start + 1] == '.') {
             return 0; /* "/../" */
         }
         start = i + 1;
@@ -947,7 +1045,11 @@ static int uri_path_is_clean(const char *uri)
 
 /* ============================== M2: 경로 확인 (Phase 1에서 이어짐) ============================== */
 
-static int uri_parse(const char *uri, char *filename, char *cgiargs);
+enum uri_decode { DECODE_OK, DECODE_BAD, DECODE_SLASH, DECODE_LONG };
+
+static enum uri_decode uri_path_decode(const char *uri, char *path, size_t cap);
+static int uri_parse(const char *path, const char *query, char *filename,
+                     char *cgiargs);
 static int static_serve(int fd, const struct http_request *req,
                         const char *filename, off_t filesize, int *keep);
 static int cgi_serve(int fd, const struct http_request *req,
@@ -959,11 +1061,32 @@ static int cgi_serve(int fd, const struct http_request *req,
  */
 static int request_route(int fd, struct http_request *req, int *keep)
 {
-    char filename[MAXLINE], cgiargs[MAXLINE];
+    char path[MAXLINE], filename[MAXLINE], cgiargs[MAXLINE];
+    const char *query = strchr(req->uri, '?');
     struct stat sbuf;
     int is_static;
 
-    is_static = uri_parse(req->uri, filename, cgiargs);
+    /* 퍼센트 디코딩은 직접 처리하는 요청에만. 중계는 원래 URI를 그대로 넘김 */
+    switch (uri_path_decode(req->uri, path, sizeof(path))) {
+    case DECODE_BAD:
+        return error_reply(fd, req, 400, req->uri,
+                           "Bad percent-encoding in the path", keep);
+    case DECODE_SLASH:
+        return error_reply(fd, req, 404, req->uri,
+                           "Tiny doesn't accept an encoded slash", keep);
+    case DECODE_LONG:
+        *keep = 0;
+        return error_reply(fd, req, 414, req->uri, "Path too long", keep);
+    default:
+        break;
+    }
+    /* 6단계 검사는 디코딩 전 URI였으므로 %2e%2e 같은 것을 여기서 다시 막음 */
+    if (!uri_segments_are_clean(path, strlen(path))) {
+        return error_reply(fd, req, 403, req->uri,
+                           "Tiny doesn't serve this path", keep);
+    }
+
+    is_static = uri_parse(path, query ? query + 1 : NULL, filename, cgiargs);
     if (is_static < 0) {
         *keep = 0;
         return error_reply(fd, req, 414, req->uri, "Path too long", keep);
@@ -974,7 +1097,8 @@ static int request_route(int fd, struct http_request *req, int *keep)
     }
 
     if (is_static) {
-        if (strcmp(req->method, "POST") == 0) { /* 서버는 알지만 이 대상에는 안 됨 */
+        if (strcmp(req->method, "POST") ==
+            0) { /* 서버는 알지만 이 대상에는 안 됨 */
             return error_reply_extra(fd, req, 405, "Allow: GET, HEAD\r\n",
                                      req->method,
                                      "Static files allow GET and HEAD", keep);
@@ -998,33 +1122,97 @@ static int request_route(int fd, struct http_request *req, int *keep)
     return cgi_serve(fd, req, filename, cgiargs, keep);
 }
 
-/*
- * URI를 정적/동적으로 나누고 파일 경로와 CGI 인자를 만듭니다 (Phase 1 규칙).
- * 정적 1, 동적 0, 경로가 버퍼보다 길면 -1. URI는 바꾸지 않음 (로그에 원본 유지).
- */
-static int uri_parse(const char *uri, char *filename, char *cgiargs)
+static int hex_value(char c)
 {
-    const char *question;
-    size_t path_len;
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/*
+ * URI의 '?' 앞 경로에서 %XX를 풀어 path에 씀 (static-percent-path).
+ * 브라우저는 공백, 한글 파일 이름을 인코딩해서 보내므로 풀어야 파일을 찾음.
+ *   딱 한 번만 풂: "%252e"는 "%2e"라는 글자가 되고 다시 풀리지 않음.
+ *     두 번 풀면 "%252e%252e"가 ".."이 되어 경로 검사를 피함
+ *   잘못된 표기("%G1", 끝에 남은 "%")와 제어 문자(%00~%1F, %7F)는 DECODE_BAD (400).
+ *     %00은 C 문자열을 거기서 끊어 다른 파일을 열게 만듦
+ *   %2F는 DECODE_SLASH (404): 인코딩된 '/'로 경로 조각 경계를 숨기지 못하게
+ *     (Apache 기본값 AllowEncodedSlashes Off와 같음)
+ *   '+'는 공백으로 바꾸지 않음 (폼 인코딩 규칙이라 경로에는 해당 없음)
+ *   쿼리는 풀지 않음: CGI의 QUERY_STRING은 인코딩된 채로 넘기는 것이 규약
+ */
+static enum uri_decode uri_path_decode(const char *uri, char *path, size_t cap)
+{
+    const char *q = strchr(uri, '?');
+    size_t len = q ? (size_t)(q - uri) : strlen(uri);
+    size_t j = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)uri[i];
+
+        if (c == '%') {
+            int hi, lo;
+
+            if (len - i < 3) {
+                return DECODE_BAD;
+            }
+            hi = hex_value(uri[i + 1]);
+            lo = hex_value(uri[i + 2]);
+            if (hi < 0 || lo < 0) {
+                return DECODE_BAD;
+            }
+            c = (unsigned char)(hi * 16 + lo);
+            i += 2;
+            if (c == '/') {
+                return DECODE_SLASH;
+            }
+            if (c < 0x20 || c == 0x7f) {
+                return DECODE_BAD;
+            }
+        }
+        if (j + 1 >= cap) {
+            return DECODE_LONG;
+        }
+        path[j++] = (char)c;
+    }
+    path[j] = '\0';
+    return DECODE_OK;
+}
+
+/*
+ * 디코딩한 경로와 쿼리로 정적/동적을 나누고 파일 경로와 CGI 인자를 만듭니다.
+ * 정적 1, 동적 0, 경로가 버퍼보다 길면 -1. query는 '?' 뒤 (없으면 NULL).
+ *   경로는 이미 '?'에서 잘린 것이라 다시 '?'로 자르지 않음 (%3F는 파일 이름의 일부)
+ *   경로의 첫 조각이 cgi-bin일 때만 CGI. "/docs/cgi-bin-notes.html"이나
+ *   "/home.html?x=cgi-bin"은 정적 파일 (F9)
+ *   정적 파일은 쿼리를 무시: "/style.css?v=2" → ./style.css
+ */
+static int uri_parse(const char *path, const char *query, char *filename,
+                     char *cgiargs)
+{
+    size_t path_len = strlen(path);
+    int is_cgi = path_len >= 8 && strncmp(path, "/cgi-bin", 8) == 0 &&
+                 (path_len == 8 || path[8] == '/');
     int n;
 
-    if (!strstr(uri, "cgi-bin")) {
+    if (!is_cgi) {
         cgiargs[0] = '\0';
-        n = snprintf(filename, MAXLINE, ".%s%s", uri,
-                     uri[strlen(uri) - 1] == '/' ? "home.html" : "");
+        n = snprintf(filename, MAXLINE, ".%s%s", path,
+                     path[path_len - 1] == '/' ? "home.html" : "");
         return (n < 0 || n >= MAXLINE) ? -1 : 1;
     }
-    question = strchr(uri, '?');
-    path_len = question ? (size_t)(question - uri) : strlen(uri);
-    if (question) {
-        n = snprintf(cgiargs, MAXLINE, "%s", question + 1);
-        if (n < 0 || n >= MAXLINE) {
-            return -1;
-        }
-    } else {
-        cgiargs[0] = '\0';
+    n = snprintf(cgiargs, MAXLINE, "%s", query ? query : "");
+    if (n < 0 || n >= MAXLINE) {
+        return -1;
     }
-    n = snprintf(filename, MAXLINE, ".%.*s", (int)path_len, uri);
+    n = snprintf(filename, MAXLINE, ".%s", path);
     return (n < 0 || n >= MAXLINE) ? -1 : 0;
 }
 
@@ -1058,7 +1246,7 @@ static int static_serve(int fd, const struct http_request *req,
     if (response_head_send(fd, 200, NULL, http_mime_type(filename), NULL,
                            (size_t)filesize, keep) < 0 ||
         (srcp != NULL && write_all(fd, srcp, (size_t)filesize) < 0)) {
-        *keep = 0; /* 응답을 보내다 실패하면 바로 닫음 */
+        *keep = KEEP_SEND_FAILED; /* 응답을 보내다 실패하면 바로 닫음 */
     }
     if (srcp != NULL) {
         munmap(srcp, (size_t)filesize);
@@ -1131,8 +1319,7 @@ static void child_close_fds(void)
  *   EOF 뒤에도 CGI가 계속 돌 수 있어 waitpid(WNOHANG)를 마감까지 반복 (4.3).
  *   성공하면 *out에 malloc한 출력 (호출한 쪽이 free).
  */
-static int cgi_output_collect(pid_t pid, int outfd, char **out,
-                              size_t *out_len)
+static int cgi_output_collect(pid_t pid, int outfd, char **out, size_t *out_len)
 {
     long deadline = now_ms() + CGI_TIMEOUT_SEC * 1000L;
     size_t cap = 4096, len = 0;
@@ -1243,7 +1430,32 @@ done:
  *   Status: 404 Not Found가 있으면 그 상태, 없으면 200
  *   Content-Length, Connection은 CGI 값을 무시하고 서버가 직접 씀
  *   빈 줄이 없거나, 출력이 비었거나, ':' 없는 헤더 줄이면 500
+ * 중계 응답(proxy_response_parse)과 같은 HTTP 규칙으로 검사 (F8)
+ *   500: 1xx 상태(101 포함), Transfer-Encoding, 토큰이 아닌 헤더 이름, 제어 문자
+ *   204, 304: 본문과 Content-Length 없이 헤더에서 끝냄 (RFC 9110 8.6, 9112 6.3)
+ *     204: RFC가 Content-Length를 금지함
+ *     304: 선택이 아니라 필수. 서버가 쓰는 Content-Length는 실제 본문 길이(0)인데,
+ *          304의 Content-Length는 같은 요청에 200을 보냈을 때의 길이여야 해서
+ *          0은 틀린 값임 (RFC 9110 8.6). 중계는 백엔드가 준 값을 그대로 전달할
+ *          수 있어 304의 길이를 남김. 그래서 304에서만 CGI와 중계 규칙이 다름
+ *   홉 단위 헤더(Keep-Alive, Upgrade 등)는 뺌
  */
+
+/* CGI가 써도 클라이언트에 보내지 않는 헤더: 서버가 쓰거나 한 구간 전용 */
+static const char *const CGI_DROP[] = {
+    "Content-Length", "Connection", "Keep-Alive", "Proxy-Connection", "TE",
+    "Trailer",        "Upgrade",    NULL};
+
+static int cgi_header_dropped(const char *name, size_t len)
+{
+    for (int i = 0; CGI_DROP[i] != NULL; i++) {
+        if (strlen(CGI_DROP[i]) == len &&
+            strncasecmp(name, CGI_DROP[i], len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 static int cgi_reply(int fd, const struct http_request *req, const char *out,
                      size_t len, int *keep)
 {
@@ -1268,8 +1480,8 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
         }
     }
     if (len == 0 || !found) {
-        return error_reply(fd, req, 500, req->uri,
-                           "CGI output has no header", keep);
+        return error_reply(fd, req, 500, req->uri, "CGI output has no header",
+                           keep);
     }
 
     extra[0] = '\0';
@@ -1286,11 +1498,20 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
         if (end > pos) {
             size_t line_len = end - pos;
             colon = memchr(out + pos, ':', line_len);
-            if (colon == NULL) {
+            if (colon == NULL || http_has_ctl(out + pos, line_len)) {
                 return error_reply(fd, req, 500, req->uri,
                                    "Malformed CGI header", keep);
             }
             size_t name_len = (size_t)(colon - (out + pos));
+            if (!http_is_token(out + pos, name_len)) {
+                return error_reply(fd, req, 500, req->uri,
+                                   "Malformed CGI header name", keep);
+            }
+            if (name_len == 17 &&
+                strncasecmp(out + pos, "Transfer-Encoding", 17) == 0) {
+                return error_reply(fd, req, 500, req->uri,
+                                   "CGI must not set Transfer-Encoding", keep);
+            }
             if (name_len == 6 && strncasecmp(out + pos, "Status", 6) == 0) {
                 const char *v = colon + 1;
                 const char *vend = out + end;
@@ -1304,7 +1525,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
                 }
                 memcpy(num, v, 3);
                 status = atoi(num);
-                if (status < 100 || status > 599) {
+                if (status < 200 || status > 599) { /* 1xx는 최종 응답이 아님 */
                     return error_reply(fd, req, 500, req->uri,
                                        "Malformed CGI status", keep);
                 }
@@ -1317,11 +1538,8 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
                     snprintf(reason, sizeof(reason), "%s",
                              http_status_text(status));
                 }
-            } else if ((name_len == 14 &&
-                        strncasecmp(out + pos, "Content-Length", 14) == 0) ||
-                       (name_len == 10 &&
-                        strncasecmp(out + pos, "Connection", 10) == 0)) {
-                /* 서버가 직접 씀 */
+            } else if (cgi_header_dropped(out + pos, name_len)) {
+                /* 서버가 직접 쓰거나 한 구간 전용 */
             } else {
                 if (extra_len + line_len + 3 > sizeof(extra)) {
                     return error_reply(fd, req, 500, req->uri,
@@ -1336,11 +1554,19 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
         pos = eol + 1;
     }
 
+    /* 본문 없이 헤더에서 끝남. 304에 길이를 쓰면 틀린 값(0)이라 반드시 뺌 */
+    if (status == 204 || status == 304) {
+        if (response_head_send(fd, status, reason, NULL, extra,
+                               NO_CONTENT_LENGTH, keep) < 0) {
+            *keep = KEEP_SEND_FAILED;
+        }
+        return status;
+    }
     if (response_head_send(fd, status, reason, NULL, extra, len - body_start,
                            keep) < 0 ||
         (len > body_start &&
          write_all(fd, out + body_start, len - body_start) < 0)) {
-        *keep = 0;
+        *keep = KEEP_SEND_FAILED;
     }
     return status;
 }
@@ -1369,8 +1595,7 @@ static int cgi_serve(int fd, const struct http_request *req,
     struct sigaction default_action;
 
     /* 1. envp: 부모가 fork 전에 만들어 둠 (2.5) */
-    snprintf(env_method, sizeof(env_method), "REQUEST_METHOD=%s",
-             req->method);
+    snprintf(env_method, sizeof(env_method), "REQUEST_METHOD=%s", req->method);
     snprintf(env_query, sizeof(env_query), "QUERY_STRING=%s", cgiargs);
     snprintf(env_protocol, sizeof(env_protocol), "SERVER_PROTOCOL=%s",
              req->version);
@@ -1446,8 +1671,7 @@ static int cgi_serve(int fd, const struct http_request *req,
                            "CGI program did not finish in time", keep);
     }
     if (result == CGI_FAILED) {
-        return error_reply(fd, req, 500, filename, "CGI program failed",
-                           keep);
+        return error_reply(fd, req, 500, filename, "CGI program failed", keep);
     }
     status = cgi_reply(fd, req, out, out_len, keep);
     free(out);

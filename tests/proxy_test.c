@@ -363,6 +363,23 @@ static void test_response_parse(void)
                               0, &res, out, sizeof(out)) == 1);
 }
 
+/* F4: 204에는 요청 메서드와 관계없이 Content-Length를 보내지 않음 (RFC 9110 8.6) */
+static void test_response_204_has_no_length_even_for_head(void)
+{
+    struct proxy_response res;
+    char out[9000];
+
+    TEST_CHECK(parse_response("HTTP/1.0 204 No Content\r\n"
+                              "Content-Length: 5\r\n\r\n",
+                              1, &res, out, sizeof(out)) == 0);
+    TEST_CHECK(res.body == PROXY_BODY_NONE);
+    TEST_CHECK(!res.has_length);
+    /* HEAD + 200은 지금처럼 백엔드 길이를 알려 줌 */
+    TEST_CHECK(parse_response("HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n", 1,
+                              &res, out, sizeof(out)) == 0);
+    TEST_CHECK(res.has_length && res.length == 5);
+}
+
 static void test_response_parse_errors(void)
 {
     struct proxy_response res;
@@ -408,5 +425,7 @@ TEST_LIST = {
     {"request_build_body_and_http10", test_request_build_body_and_http10},
     {"response_parse", test_response_parse},
     {"response_parse_errors", test_response_parse_errors},
+    {"HEAD 요청의 204 응답에도 Content-Length를 붙이지 않는다",
+     test_response_204_has_no_length_even_for_head},
     {"head_end", test_head_end},
     {NULL, NULL}};
