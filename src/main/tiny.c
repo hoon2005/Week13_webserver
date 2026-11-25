@@ -570,6 +570,13 @@ static ssize_t reader_readn(struct conn_reader *r, char *usrbuf, size_t len,
 
 /* ============================== 응답 쓰기 ============================== */
 
+/*
+ * keep 값: 1 연결 유지, 0 응답 뒤 닫음, KEEP_SEND_FAILED 응답을 보내다 실패.
+ * 보내다 실패하면 지킬 응답이 없으므로 남은 데이터를 비우지 않고 바로 닫음
+ * (F2, m4m5.md "응답을 보내다 실패 → 바로 닫음")
+ */
+#define KEEP_SEND_FAILED (-1)
+
 static int write_all(int fd, const void *buf, size_t n)
 {
     return rio_writen(fd, (void *)buf, n) == (ssize_t)n ? 0 : -1;
@@ -604,10 +611,10 @@ static int response_head_send(int fd, int status, const char *reason,
                  "Content-Length: %zu\r\n"
                  "Connection: %s\r\n\r\n",
                  status, reason ? reason : http_status_text(status), type_line,
-                 extra ? extra : "", length, *keep ? "keep-alive" : "close");
+                 extra ? extra : "", length, *keep > 0 ? "keep-alive" : "close");
     if (n < 0 || n >= (int)sizeof(header) ||
         write_all(fd, header, (size_t)n) < 0) {
-        *keep = 0;
+        *keep = KEEP_SEND_FAILED;
         return -1;
     }
     return 0;
@@ -615,7 +622,7 @@ static int response_head_send(int fd, int status, const char *reason,
 
 /*
  * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
- * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 0으로.
+ * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 KEEP_SEND_FAILED로.
  * extra: 추가 헤더 (405의 Allow 등, 없으면 NULL). 보낸 상태 코드를 돌려줌.
  */
 static int error_reply_extra(int fd, const struct http_request *req,
@@ -639,7 +646,7 @@ static int error_reply_extra(int fd, const struct http_request *req,
     if (response_head_send(fd, status, NULL, "text/html", extra,
                            (size_t)body_len, keep) < 0 ||
         (send_body && write_all(fd, body, (size_t)body_len) < 0)) {
-        *keep = 0;
+        *keep = KEEP_SEND_FAILED;
     }
     return status;
 }
@@ -664,7 +671,7 @@ static void request_log(const struct http_request *req, int status,
 
 /* request_handle의 결과: 연결을 어떻게 할지 */
 enum conn_next {
-    CONN_CLOSE_SILENT = 0,  /* 응답 없이 바로 닫음 (끊김, 마감, 본문 도중 실패) */
+    CONN_CLOSE_SILENT = 0,  /* 바로 닫음 (끊김, 마감, 본문 도중 실패, 응답 전송 실패) */
     CONN_KEEP = 1,          /* 다음 요청을 기다림 */
     CONN_CLOSE_REPLIED = 2, /* 응답을 보낸 뒤 닫음 → 남은 데이터를 비우고 닫음 */
     CONN_CLOSE_RESET = 3    /* RST로 닫음: 길이 없는 프록시 응답이 잘림 (M6-13) */
@@ -672,6 +679,15 @@ enum conn_next {
 
 static int request_handle(int fd, struct conn_reader *r, int can_keep,
                           int watch_wake, const char *client_ip);
+
+/* 응답을 보낸 뒤의 keep 값을 연결 처리로 바꿈 (F2) */
+static int conn_after(int keep)
+{
+    if (keep > 0) {
+        return CONN_KEEP;
+    }
+    return keep < 0 ? CONN_CLOSE_SILENT : CONN_CLOSE_REPLIED;
+}
 static int request_route(int fd, struct http_request *req, int *keep);
 static int proxy_handle(int fd, struct http_request *req,
                         struct proxy_route *route, const char *client_ip,
@@ -807,7 +823,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
         error_reply(fd, &req, status, "request line", "Bad request line",
                     &keep);
         request_log(&req, status, NULL);
-        return CONN_CLOSE_REPLIED;
+        return conn_after(keep);
     }
 
     /* 2. 헤더: 빈 줄까지 "이름: 값" → 구조체 + 원본 블록 */
@@ -823,7 +839,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
         if (status != 0) {
             error_reply(fd, &req, status, "header", "Bad header", &keep);
             request_log(&req, status, NULL);
-            return CONN_CLOSE_REPLIED;
+            return conn_after(keep);
         }
     }
 
@@ -832,7 +848,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
     if (status != 0) {
         error_reply(fd, &req, status, req.uri, "Request rejected", &keep);
         request_log(&req, status, NULL);
-        return CONN_CLOSE_REPLIED;
+        return conn_after(keep);
     }
     keep = req.keep_alive && can_keep;
     body_len = http_body_length(&req);
@@ -853,7 +869,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
             keep = 0;
             error_reply(fd, &req, 500, req.uri, "Out of memory", &keep);
             request_log(&req, 500, NULL);
-            return CONN_CLOSE_REPLIED;
+            return conn_after(keep);
         }
         n = reader_readn(r, req.body, (size_t)body_len, deadline);
         if (n != (ssize_t)body_len) { /* 도중에 끊김, 마감: 응답 없이 닫음 */
@@ -869,7 +885,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
                              "Tiny doesn't serve this path", &keep);
         request_log(&req, status, NULL);
         http_request_free(&req);
-        return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        return conn_after(keep);
     }
 
     /* 7. 라우팅: 규칙에 걸리면 백엔드로, 아니면 직접 처리 (M6-2, M6-6) */
@@ -882,7 +898,7 @@ static int request_handle(int fd, struct conn_reader *r, int can_keep,
     status = request_route(fd, &req, &keep);
     request_log(&req, status, NULL);
     http_request_free(&req);
-    return keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+    return conn_after(keep);
 }
 
 /*
@@ -906,10 +922,10 @@ static int proxy_handle(int fd, struct http_request *req,
                     status == 504 ? "Backend did not respond in time"
                                   : "Backend failed",
                     keep);
-        next = *keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        next = conn_after(*keep);
         break;
     case PROXY_REPLIED:
-        next = *keep ? CONN_KEEP : CONN_CLOSE_REPLIED;
+        next = conn_after(*keep);
         break;
     case PROXY_RESET:
         next = CONN_CLOSE_RESET;
@@ -1064,7 +1080,7 @@ static int static_serve(int fd, const struct http_request *req,
     if (response_head_send(fd, 200, NULL, http_mime_type(filename), NULL,
                            (size_t)filesize, keep) < 0 ||
         (srcp != NULL && write_all(fd, srcp, (size_t)filesize) < 0)) {
-        *keep = 0; /* 응답을 보내다 실패하면 바로 닫음 */
+        *keep = KEEP_SEND_FAILED; /* 응답을 보내다 실패하면 바로 닫음 */
     }
     if (srcp != NULL) {
         munmap(srcp, (size_t)filesize);
@@ -1346,7 +1362,7 @@ static int cgi_reply(int fd, const struct http_request *req, const char *out,
                            keep) < 0 ||
         (len > body_start &&
          write_all(fd, out + body_start, len - body_start) < 0)) {
-        *keep = 0;
+        *keep = KEEP_SEND_FAILED;
     }
     return status;
 }

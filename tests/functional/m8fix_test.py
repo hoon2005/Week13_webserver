@@ -51,5 +51,44 @@ class F1NagleTest(unittest.TestCase):
                         "새 연결 %s, 같은 연결 %s" % (fresh, reused))
 
 
+class F2SendFailureTest(unittest.TestCase):
+    """F2: 응답 전송에 실패해도 닫기 전에 최대 1초를 더 기다림"""
+
+    def test_send_failure_closes_without_lingering(self):
+        # 작업자 1명: 멈춘 연결을 닫아야 다음 손님을 받음. 쓰기 타임아웃 2초
+        server = Server("--threads", "1", "--timeout", "1")
+        try:
+            with open(os.path.join(server.www, "big.bin"), "wb") as f:
+                f.write(b"x" * (50 * 1024 * 1024))
+            stalled = server.connect(timeout=30)
+            stalled.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n")
+            result = {}
+
+            def next_customer():
+                result["reply"] = server.exchange(
+                    b"GET /home.html HTTP/1.1\r\nHost: x\r\n\r\n", timeout=30)
+                result["done"] = time.monotonic()
+
+            import threading
+            t = threading.Thread(target=next_customer)
+            t.start()
+            # 전송 실패 뒤에 남는 요청 로그를 기다림 (stalled는 읽지 않음)
+            logged = None
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                if "/big.bin" in server.read_log():
+                    logged = time.monotonic()
+                    break
+                time.sleep(0.01)
+            t.join()
+            stalled.close()
+            self.assertIsNotNone(logged, "전송 실패 로그가 없음")
+            self.assertEqual(result["reply"][0], 200)
+            # 로그가 찍힌 뒤 연결을 바로 닫으면 다음 손님은 곧 응답을 받음
+            self.assertLess(result["done"] - logged, 0.5)
+        finally:
+            server.stop()
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
