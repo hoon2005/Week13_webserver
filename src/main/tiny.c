@@ -57,7 +57,7 @@ struct server_config {
     int keepalive_max;   /* 연결당 요청 수 상한 */
     int proxy_timeout;   /* 백엔드 응답 헤더까지 합계, 본문 데이터 간격(초) */
     long open_max;       /* CGI 자식에서 fd를 닫을 범위 (fork 전에 계산) */
-    char path_env[1024]; /* CGI에 넘길 PATH=... */
+    char *path_env;      /* CGI에 넘길 PATH=... (시작할 때 길이만큼 할당, F6) */
 };
 
 static struct server_config cfg = {
@@ -191,9 +191,18 @@ int main(int argc, char **argv)
     if (cfg.open_max <= 0 || cfg.open_max > 65536) {
         cfg.open_max = 65536;
     }
+    /* 서버의 PATH를 자르지 않고 넘김. fork 전에 한 번만 할당해서 자식은 할당하지 않음 */
     path = getenv("PATH");
-    snprintf(cfg.path_env, sizeof(cfg.path_env), "PATH=%s",
-             path ? path : "/usr/bin:/bin");
+    if (path == NULL) {
+        path = "/usr/bin:/bin";
+    }
+    cfg.path_env = malloc(strlen("PATH=") + strlen(path) + 1);
+    if (cfg.path_env == NULL) {
+        fprintf(stderr, "PATH를 준비하지 못했습니다\n");
+        exit(1);
+    }
+    strcpy(cfg.path_env, "PATH=");
+    strcat(cfg.path_env, path);
 
     /* 다른 스레드를 만들기 전에 막음. 새 스레드는 이 설정을 물려받고,
      * 시그널은 시그널 스레드의 sigwait로만 받음 (M7-5) */
@@ -255,6 +264,7 @@ int main(int argc, char **argv)
 
     conn_queue_destroy(&queue);
     free(workers);
+    free(cfg.path_env);
     close(wake_pipe[0]);
     close(wake_pipe[1]);
     printf("종료 완료\n");

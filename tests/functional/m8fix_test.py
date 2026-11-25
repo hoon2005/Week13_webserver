@@ -190,5 +190,20 @@ class F5HeadErrorBodyTest(unittest.TestCase):
                 self.assertEqual(body, b"")
 
 
+class F6LongPathTest(unittest.TestCase):
+    """F6: CGI가 받는 PATH가 1,018바이트에서 잘림"""
+
+    def test_cgi_receives_full_path(self):
+        long_path = "/usr/bin:/bin:/" + "a" * 2000
+        env = dict(os.environ, PATH=long_path)
+        server = Server(env=env)
+        try:
+            status, _, body = server.get("/cgi-bin/pathlen")
+            self.assertEqual(status, 200)
+            self.assertEqual(body.strip(), str(len(long_path)).encode())
+        finally:
+            server.stop()
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
