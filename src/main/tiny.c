@@ -28,6 +28,7 @@
 #include "http.h"
 #include "proxy.h"
 
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdatomic.h>
 #include <strings.h>
@@ -424,16 +425,21 @@ static int accept_cloexec(int listenfd)
  *   블로킹으로 되돌림: macOS는 리스닝 소켓의 논블로킹 설정을 물려줌 (M7-6)
  *   쓰기 타임아웃(--timeout의 2배): 응답을 받아 가지 않는 손님 (m4m5.md 2.4)
  *   읽기는 poll로 마감을 지키므로 SO_RCVTIMEO를 쓰지 않음 (M7-4)
+ *   TCP_NODELAY: 헤더와 본문을 write 두 번에 나눠 보내므로, Nagle이 작은 본문을
+ *   헤더의 ACK까지 붙잡고 클라이언트는 ACK를 늦게 보내(Delayed ACK) keep-alive의
+ *   두 번째 요청부터 약 40ms씩 늦어짐 (F1, RFC 1122 4.2.3.2, 4.2.3.4)
  */
 static void conn_socket_setup(int connfd)
 {
     struct timeval snd = {cfg.timeout * 2, 0};
     int flags = fcntl(connfd, F_GETFL);
+    int one = 1;
 
     if (flags >= 0 && (flags & O_NONBLOCK)) {
         fcntl(connfd, F_SETFL, flags & ~O_NONBLOCK);
     }
     setsockopt(connfd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+    setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
 /* ============================== M7-4: 요청 수신 마감 ============================== */

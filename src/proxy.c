@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -595,11 +596,14 @@ static int backend_connect(const struct proxy_backend *b, long wait_ms)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     int err = 0;
     socklen_t elen = sizeof(err);
+    int one = 1;
     int r;
 
     if (fd < 0) {
         return -3;
     }
+    /* 요청 헤더와 POST 본문을 나눠 쓰므로 백엔드 쪽에도 Nagle 지연을 끔 (F1) */
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     /* CGI 자식이 물려받지 않게 함. fork와의 틈은 CGI 자식이 fd를 모두 닫아서 막음 */
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 ||
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) < 0) {
