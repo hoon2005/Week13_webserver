@@ -621,17 +621,61 @@ static int response_head_send(int fd, int status, const char *reason,
 }
 
 /*
+ * 요청에서 온 글자를 HTML에 넣을 수 있게 바꿈: < > & " (F3, 반사형 XSS 방지).
+ * 결과가 out에 다 들어가지 않으면 들어가는 데까지만 씀 (항상 NUL로 끝남).
+ */
+static void html_escape(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+
+    for (; *in != '\0'; in++) {
+        const char *rep;
+        char one[2] = {*in, '\0'};
+        size_t len;
+
+        switch (*in) {
+        case '<':
+            rep = "&lt;";
+            break;
+        case '>':
+            rep = "&gt;";
+            break;
+        case '&':
+            rep = "&amp;";
+            break;
+        case '"':
+            rep = "&quot;";
+            break;
+        default:
+            rep = one;
+            break;
+        }
+        len = strlen(rep);
+        if (n + len >= cap) {
+            break;
+        }
+        memcpy(out + n, rep, len);
+        n += len;
+    }
+    out[n] = '\0';
+}
+
+/*
  * 오류 응답 (Phase 1의 http_error_send에 Content-Length, Connection 추가).
  * HEAD 요청이면 본문을 빼고 보냄. 쓰기가 실패하면 *keep을 KEEP_SEND_FAILED로.
  * extra: 추가 헤더 (405의 Allow 등, 없으면 NULL). 보낸 상태 코드를 돌려줌.
+ * cause는 요청에서 온 글자라 HTML 특수문자를 바꿔서 넣음 (F3).
  */
 static int error_reply_extra(int fd, const struct http_request *req,
                              int status, const char *extra, const char *cause,
                              const char *longmsg, int *keep)
 {
     char body[MAXBUF];
+    char safe_cause[MAXBUF];
     int body_len;
     int send_body = !(req != NULL && strcmp(req->method, "HEAD") == 0);
+
+    html_escape(cause, safe_cause, sizeof(safe_cause));
 
     body_len = snprintf(body, sizeof(body),
                         "<html><title>Tiny Error</title>"
@@ -639,7 +683,7 @@ static int error_reply_extra(int fd, const struct http_request *req,
                         "%d: %s\r\n"
                         "<p>%s: %s\r\n"
                         "<hr><em>The Tiny Web server</em>\r\n",
-                        status, http_status_text(status), longmsg, cause);
+                        status, http_status_text(status), longmsg, safe_cause);
     if (body_len >= (int)sizeof(body)) {
         body_len = sizeof(body) - 1;
     }

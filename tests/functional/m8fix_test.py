@@ -90,5 +90,34 @@ class F2SendFailureTest(unittest.TestCase):
             server.stop()
 
 
+class F3ErrorPageEscapeTest(unittest.TestCase):
+    """F3: 요청에서 온 HTML 태그가 404·403 오류 페이지에 그대로 들어감"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def check(self, path, status):
+        got, _, body = self.server.exchange(
+            b"GET " + path + b" HTTP/1.1\r\nHost: x\r\n\r\n")
+        self.assertEqual(got, status)
+        return body
+
+    def test_404_escapes_html_special_characters(self):
+        body = self.check(b'/<script>alert(1)</script>&"q.html', 404)
+        self.assertNotIn(b"<script>", body)
+        self.assertIn(b"&lt;script&gt;alert(1)&lt;/script&gt;&amp;&quot;q.html",
+                      body)
+
+    def test_403_escapes_html_special_characters(self):
+        body = self.check(b"/a/../<b>x</b>", 403)
+        self.assertNotIn(b"<b>", body)
+        self.assertIn(b"&lt;b&gt;x&lt;/b&gt;", body)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
