@@ -310,6 +310,40 @@ static void test_method_saved_before_other_checks(void)
     free(req);
 }
 
+/* F10: Host 값의 형식 검사 (RFC 9112 3.2, RFC 3986 3.2.2). 목록은 참고 커밋 7383e40 */
+static void test_host_format(void)
+{
+    static const char *const good[] = {"a",
+                                       "a:8000",
+                                       "my_host.example.com",
+                                       "127.0.0.1:80",
+                                       "[::1]",
+                                       "[::1]:80",
+                                       "a:",
+                                       "a%41b",
+                                       "[::ffff:1.2.3.4]",
+                                       "[2001:db8::1]:8080"};
+    static const char *const bad[] = {
+        "a b",     "a/b",       "a@b",       "a:80x",  "a:b:c",
+        "[::1",    "[]",        "[::1]x",    "<x>",    "a\"b",
+        "",        ":80",       "a%zz",      "a%4",    "a%",
+        "[:::::]", "[12345::]", "[1.2.3.4]", "[v1.x]", "[::1%lo]"};
+    struct http_request *req = new_request();
+    char line[64];
+
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        http_request_init(req);
+        snprintf(line, sizeof(line), "Host: %s\r\n", good[i]);
+        TEST_CHECK_(parse_header(req, line) == 0, "Host '%s'", good[i]);
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        http_request_init(req);
+        snprintf(line, sizeof(line), "Host: %s\r\n", bad[i]);
+        TEST_CHECK_(parse_header(req, line) == 400, "Host '%s'", bad[i]);
+    }
+    free(req);
+}
+
 static void test_mime(void)
 {
     TEST_CHECK(strcmp(http_mime_type("./home.html"), "text/html") == 0);
@@ -334,5 +368,7 @@ TEST_LIST = {
     {"request_validation", test_request_validation},
     {"요청 줄 검사에 실패해도 HEAD 메서드는 먼저 저장한다",
      test_method_saved_before_other_checks},
+    {"Host는 이름[:포트] 또는 [IPv6][:포트] 형식만 받고 나머지는 400이다",
+     test_host_format},
     {"mime", test_mime},
     {NULL, NULL}};

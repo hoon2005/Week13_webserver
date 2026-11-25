@@ -3,6 +3,8 @@
  */
 #include "http.h"
 
+#include <arpa/inet.h>
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +60,57 @@ int http_has_ctl(const char *s, size_t len)
         }
     }
     return 0;
+}
+
+/*
+ * Host 값 검사 (F10, RFC 9112 3.2): 이름[:포트] 또는 [IPv6][:포트].
+ *   이름은 RFC 3986 reg-name 글자만 받고, %는 뒤에 16진수 두 자리가 있어야 함.
+ *   이름이 비면 거절 (http URI의 호스트는 빌 수 없음, RFC 9110 4.2.1).
+ *   [v1.x] 같은 IPvFuture와 [::1%lo] 같은 영역 표시는 받지 않음.
+ *   규칙과 테스트 목록은 참고 커밋 7383e40 (phase2/dabin-m6m7)
+ */
+static int host_is_valid(const char *v)
+{
+    if (*v == '[') {
+        char text[INET6_ADDRSTRLEN];
+        struct in6_addr addr;
+        size_t n = strspn(++v, "0123456789abcdefABCDEF:.");
+
+        if (v[n] != ']' || n >= sizeof(text)) {
+            return 0;
+        }
+        memcpy(text, v, n);
+        text[n] = '\0';
+        if (inet_pton(AF_INET6, text, &addr) != 1) {
+            return 0;
+        }
+        v += n + 1;
+    } else {
+        const char *start = v;
+
+        while (*v != '\0') {
+            if (*v == '%') {
+                if (!isxdigit((unsigned char)v[1]) ||
+                    !isxdigit((unsigned char)v[2])) {
+                    return 0;
+                }
+                v += 3;
+            } else if (isalnum((unsigned char)*v) ||
+                       strchr("-._~!$&'()*+,;=", *v) != NULL) {
+                v++;
+            } else {
+                break;
+            }
+        }
+        if (v == start) {
+            return 0;
+        }
+    }
+    if (*v == ':') { /* 포트는 숫자만. 비어 있어도 됨 (RFC 3986 3.2.3) */
+        v++;
+        v += strspn(v, "0123456789");
+    }
+    return *v == '\0';
 }
 
 /* 줄 끝의 \r\n 또는 \n을 뺀 길이 */
@@ -309,7 +362,7 @@ int http_parse_header_line(struct http_request *req, const char *line,
 
     if (strcasecmp(name, "Host") == 0) {
         req->host_count++;
-        if (strlen(value) >= sizeof(req->host)) {
+        if (strlen(value) >= sizeof(req->host) || !host_is_valid(value)) {
             return 400;
         }
         strcpy(req->host, value);

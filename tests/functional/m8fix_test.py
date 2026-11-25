@@ -334,5 +334,31 @@ class F9QueryAndCgiPathTest(unittest.TestCase):
         self.assertIn(b"1 + 2 = 3", body)
 
 
+class F10HostFormatTest(unittest.TestCase):
+    """F10: 잘못된 Host 값도 통과하며 정적 파일 요청에서는 200이 나옴"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_malformed_host_is_400(self):
+        for host in (b"a/b", b"a b", b"[::1", b"a:80x"):
+            with self.subTest(host=host):
+                status, _, _ = self.server.exchange(
+                    b"GET /home.html HTTP/1.1\r\nHost: " + host + b"\r\n\r\n")
+                self.assertEqual(status, 400)
+
+    def test_valid_hosts_still_work(self):
+        for host in (b"localhost:8000", b"127.0.0.1", b"[::1]:80", b"example.com"):
+            with self.subTest(host=host):
+                status, _, _ = self.server.exchange(
+                    b"GET /home.html HTTP/1.1\r\nHost: " + host + b"\r\n\r\n")
+                self.assertEqual(status, 200)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
