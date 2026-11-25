@@ -3,6 +3,8 @@
  */
 #include "http.h"
 
+#include <arpa/inet.h>
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +62,57 @@ int http_has_ctl(const char *s, size_t len)
     return 0;
 }
 
+/*
+ * Host 값 검사 (F10, RFC 9112 3.2): 이름[:포트] 또는 [IPv6][:포트].
+ *   이름은 RFC 3986 reg-name 글자만 받고, %는 뒤에 16진수 두 자리가 있어야 함.
+ *   이름이 비면 거절 (http URI의 호스트는 빌 수 없음, RFC 9110 4.2.1).
+ *   [v1.x] 같은 IPvFuture와 [::1%lo] 같은 영역 표시는 받지 않음.
+ *   규칙과 테스트 목록은 참고 커밋 7383e40 (phase2/dabin-m6m7)
+ */
+static int host_is_valid(const char *v)
+{
+    if (*v == '[') {
+        char text[INET6_ADDRSTRLEN];
+        struct in6_addr addr;
+        size_t n = strspn(++v, "0123456789abcdefABCDEF:.");
+
+        if (v[n] != ']' || n >= sizeof(text)) {
+            return 0;
+        }
+        memcpy(text, v, n);
+        text[n] = '\0';
+        if (inet_pton(AF_INET6, text, &addr) != 1) {
+            return 0;
+        }
+        v += n + 1;
+    } else {
+        const char *start = v;
+
+        while (*v != '\0') {
+            if (*v == '%') {
+                if (!isxdigit((unsigned char)v[1]) ||
+                    !isxdigit((unsigned char)v[2])) {
+                    return 0;
+                }
+                v += 3;
+            } else if (isalnum((unsigned char)*v) ||
+                       strchr("-._~!$&'()*+,;=", *v) != NULL) {
+                v++;
+            } else {
+                break;
+            }
+        }
+        if (v == start) {
+            return 0;
+        }
+    }
+    if (*v == ':') { /* 포트는 숫자만. 비어 있어도 됨 (RFC 3986 3.2.3) */
+        v++;
+        v += strspn(v, "0123456789");
+    }
+    return *v == '\0';
+}
+
 /* 줄 끝의 \r\n 또는 \n을 뺀 길이 */
 static size_t line_content_len(const char *line, size_t len)
 {
@@ -86,6 +139,31 @@ static int version_parse(const char *v, int *major, int *minor)
     return 0;
 }
 
+/*
+ * 줄 앞의 메서드가 GET, POST, HEAD 중 하나면 먼저 저장 (F5).
+ * 버전이나 URI 검사에서 실패해도 오류 응답이 HEAD인지 알아서 본문을 뺄 수 있음.
+ * 모르는 메서드는 저장하지 않음 (아래 검사가 400, 501을 정함).
+ */
+static void method_store_early(struct http_request *req, const char *line,
+                               size_t len)
+{
+    static const char *const known[] = {"GET", "POST", "HEAD"};
+    size_t n = 0;
+
+    while (n < len && http_is_token(line + n, 1)) {
+        n++;
+    }
+    if (n == len || !is_space(line[n])) {
+        return; /* 메서드 뒤에 공백이 없으면 요청 줄 형식이 아님 */
+    }
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        if (strlen(known[i]) == n && strncasecmp(line, known[i], n) == 0) {
+            strcpy(req->method, known[i]);
+            return;
+        }
+    }
+}
+
 int http_parse_request_line(struct http_request *req, const char *line,
                             size_t len, size_t maxlen)
 {
@@ -98,6 +176,7 @@ int http_parse_request_line(struct http_request *req, const char *line,
     if (len == 0) {
         return 400;
     }
+    method_store_early(req, line, len);
     /* 줄바꿈이 없음: 버퍼가 다 찼으면 너무 긴 줄, 아니면 중간에 끊긴 줄 */
     if (line[len - 1] != '\n') {
         return (len >= maxlen - 1) ? 414 : 400;
@@ -197,34 +276,34 @@ int http_parse_content_length(const char *value, long *out)
     return 0;
 }
 
-/* Connection 값("keep-alive", "close", "Upgrade, close" 등)을 해석 */
+/*
+ * Connection 값("keep-alive", "close", "Upgrade, close" 등)을 해석.
+ * 복사하지 않고 값 전체를 쉼표로 나눠 훑음: 받아들인 값(헤더 한 줄 8 KiB까지)은
+ * 길이와 상관없이 끝까지 봐서 뒤쪽의 close도 놓치지 않음 (F11, RFC 9112 9.6)
+ */
 static int connection_parse(const char *value)
 {
-    char buf[HTTP_FIELD_MAX];
-    char *save = NULL;
     int result = HTTP_CONN_NONE;
+    const char *p = value;
 
-    size_t n = strlen(value);
+    while (*p != '\0') {
+        const char *t, *e;
 
-    if (n >= sizeof(buf)) {
-        n = sizeof(buf) - 1; /* 아주 긴 값은 앞부분만 봄 */
-    }
-    memcpy(buf, value, n);
-    buf[n] = '\0';
-    for (char *t = strtok_r(buf, ",", &save); t != NULL;
-         t = strtok_r(NULL, ",", &save)) {
-        char *e;
-        while (is_space(*t)) {
-            t++;
+        while (*p == ',' || is_space(*p)) {
+            p++;
         }
-        e = t + strlen(t);
+        t = p;
+        while (*p != '\0' && *p != ',') {
+            p++;
+        }
+        e = p;
         while (e > t && is_space(e[-1])) {
-            *--e = '\0';
+            e--;
         }
-        if (strcasecmp(t, "close") == 0) {
+        if ((size_t)(e - t) == 5 && strncasecmp(t, "close", 5) == 0) {
             return HTTP_CONN_CLOSE; /* close가 있으면 무조건 닫음 */
         }
-        if (strcasecmp(t, "keep-alive") == 0) {
+        if ((size_t)(e - t) == 10 && strncasecmp(t, "keep-alive", 10) == 0) {
             result = HTTP_CONN_KEEP_ALIVE;
         }
     }
@@ -283,7 +362,7 @@ int http_parse_header_line(struct http_request *req, const char *line,
 
     if (strcasecmp(name, "Host") == 0) {
         req->host_count++;
-        if (strlen(value) >= sizeof(req->host)) {
+        if (strlen(value) >= sizeof(req->host) || !host_is_valid(value)) {
             return 400;
         }
         strcpy(req->host, value);

@@ -38,7 +38,7 @@ TEST_BINS := $(TEST_SRCS:tests/%.c=$(BUILD)/test/%)
 
 FUNCTIONAL_TESTS := $(wildcard tests/functional/*_test.py)
 
-.PHONY: all test functional verify lint format release tsan clean help
+.PHONY: all test functional verify lint format release load tsan clean help
 
 all: $(PROGRAMS) $(TEST_BINS)
 
@@ -94,6 +94,11 @@ RELEASE_PROGRAMS := $(MAIN_SRCS:src/main/%.c=$(RELEASE_BUILD)/%)
 release: $(RELEASE_PROGRAMS)
 	@if [ -z "$(RELEASE_PROGRAMS)" ]; then echo "release: src/main/에 실행 파일 소스가 아직 없습니다"; fi
 
+# make load: 시나리오 표의 부하 측정(load-*)을 전부 돌립니다. wrk, ab가 필요하고 30분쯤
+# 걸립니다. 하나만 돌리거나 짧게 확인하려면 python3 tests/stress/load.py --help를 봅니다.
+load: release
+	python3 -B tests/stress/load.py
+
 $(RELEASE_PROGRAMS): $(RELEASE_BUILD)/%: src/main/%.c $(RELEASE_LIB_OBJS) | $(RELEASE_BUILD)
 	$(CC) $(CPPFLAGS) $(RELEASE_CFLAGS) $< $(RELEASE_LIB_OBJS) -pthread -o $@
 
@@ -113,12 +118,19 @@ TSAN_CFLAGS   := -std=c11 -Wall -Wextra -Werror -g -O1 -fno-omit-frame-pointer \
                  -fsanitize=thread -MMD -MP -pthread
 TSAN_LIB_OBJS := $(LIB_SRCS:src/%.c=$(TSAN_BUILD)/obj/%.o)
 TSAN_TESTS    := $(TEST_SRCS:tests/%.c=$(TSAN_BUILD)/%)
+TSAN_PROGRAMS := $(MAIN_SRCS:src/main/%.c=$(TSAN_BUILD)/%)
 
 # acutest는 테스트마다 자식 프로세스를 만들고 그 종료 코드를 결과로 읽습니다. TSan의
 # 기본 종료 코드 66은 실패로 세지 않으므로, 경고가 실패(1)로 읽히게 바꿉니다.
-tsan: $(TSAN_TESTS)
+# 단위 테스트 뒤에는 TSan으로 빌드한 서버(tiny, adder)를 띄워 정적·CGI·중계 요청을
+# 동시에 보내고 종료까지 경합이 없는지 봅니다 (tests/tsan/server_tsan.py).
+tsan: $(TSAN_TESTS) $(TSAN_PROGRAMS)
 	@if [ -z "$(TSAN_TESTS)" ]; then echo "tsan: 단위 테스트 파일이 아직 없습니다"; fi
 	@set -e; for t in $(TSAN_TESTS); do echo "== $$t (tsan)"; TSAN_OPTIONS=exitcode=1 ./$$t; done
+	@echo "== tests/tsan/server_tsan.py"; python3 -B tests/tsan/server_tsan.py $(TSAN_BUILD)
+
+$(TSAN_PROGRAMS): $(TSAN_BUILD)/%: src/main/%.c $(TSAN_LIB_OBJS) | $(TSAN_BUILD)
+	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $< $(TSAN_LIB_OBJS) -fsanitize=thread -pthread -o $@
 
 $(TSAN_BUILD)/%_test: tests/%_test.c tests/acutest.h $(TSAN_LIB_OBJS) | $(TSAN_BUILD)
 	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $< $(TSAN_LIB_OBJS) -fsanitize=thread -pthread -o $@
@@ -142,5 +154,6 @@ help:
 	@echo "make format     코드 모양 자동 수정"
 	@echo "make verify     CI와 같은 전체 검증: all + test + functional + lint"
 	@echo "make release    부하 테스트용 -O2 빌드: build/release/<이름>"
+	@echo "make load       부하 측정 전부 (wrk, ab 필요, 30분쯤): build/load/<시각>/"
 	@echo "make tsan       단위 테스트를 ThreadSanitizer로 실행"
 	@echo "make clean      build/ 삭제"

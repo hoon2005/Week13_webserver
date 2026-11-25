@@ -280,6 +280,94 @@ static void test_request_validation(void)
     free(req);
 }
 
+/* F5: 요청 줄의 다른 부분에서 실패해도 HEAD인지는 알아 둠 (오류 응답의 본문을 빼려고) */
+static void test_method_saved_before_other_checks(void)
+{
+    struct http_request *req = new_request();
+    char longline[HTTP_LINE_MAX];
+
+    TEST_CHECK(parse_line(req, "HEAD / HTTP/2.0\r\n") == 505);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "head ./x HTTP/1.1\r\n") == 400);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "HEAD / HTTP/1.1 extra\r\n") == 400);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+
+    /* 줄바꿈 없이 버퍼가 다 찬 414에서도 첫 조각이 HEAD면 알아 둠 */
+    http_request_init(req);
+    memset(longline, 'a', sizeof(longline));
+    memcpy(longline, "HEAD /", 6);
+    TEST_CHECK(http_parse_request_line(req, longline, sizeof(longline) - 1,
+                                       sizeof(longline)) == 414);
+    TEST_CHECK(strcmp(req->method, "HEAD") == 0);
+
+    /* 모르는 메서드나 토큰이 아닌 메서드는 저장하지 않음 */
+    http_request_init(req);
+    TEST_CHECK(parse_line(req, "PUT / HTTP/2.0\r\n") == 505);
+    TEST_CHECK(req->method[0] == '\0');
+    free(req);
+}
+
+/* F10: Host 값의 형식 검사 (RFC 9112 3.2, RFC 3986 3.2.2). 목록은 참고 커밋 7383e40 */
+static void test_host_format(void)
+{
+    static const char *const good[] = {"a",
+                                       "a:8000",
+                                       "my_host.example.com",
+                                       "127.0.0.1:80",
+                                       "[::1]",
+                                       "[::1]:80",
+                                       "a:",
+                                       "a%41b",
+                                       "[::ffff:1.2.3.4]",
+                                       "[2001:db8::1]:8080"};
+    static const char *const bad[] = {
+        "a b",     "a/b",       "a@b",       "a:80x",  "a:b:c",
+        "[::1",    "[]",        "[::1]x",    "<x>",    "a\"b",
+        "",        ":80",       "a%zz",      "a%4",    "a%",
+        "[:::::]", "[12345::]", "[1.2.3.4]", "[v1.x]", "[::1%lo]"};
+    struct http_request *req = new_request();
+    char line[64];
+
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        http_request_init(req);
+        snprintf(line, sizeof(line), "Host: %s\r\n", good[i]);
+        TEST_CHECK_(parse_header(req, line) == 0, "Host '%s'", good[i]);
+    }
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        http_request_init(req);
+        snprintf(line, sizeof(line), "Host: %s\r\n", bad[i]);
+        TEST_CHECK_(parse_header(req, line) == 400, "Host '%s'", bad[i]);
+    }
+    free(req);
+}
+
+/* F11: 긴 Connection 값의 뒤쪽에 있는 close도 읽음 (RFC 9112 9.6) */
+static void test_connection_close_at_end_of_long_value(void)
+{
+    struct http_request *req = new_request();
+    char headers[1200];
+    char filler[1000];
+
+    for (size_t n = 250; n <= 260; n++) {
+        memset(filler, 'a', n);
+        filler[n] = '\0';
+        snprintf(headers, sizeof(headers),
+                 "Host: x\r\nConnection: %s, close\r\n", filler);
+        TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n", headers) == 0);
+        TEST_CHECK_(req->keep_alive == 0, "앞 조각 %zu글자", n);
+    }
+    memset(filler, 'a', 900);
+    filler[900] = '\0';
+    snprintf(headers, sizeof(headers),
+             "Host: x\r\nConnection: %s, keep-alive\r\n", filler);
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.0\r\n", headers) == 0);
+    TEST_CHECK(req->keep_alive == 1);
+    free(req);
+}
+
 static void test_mime(void)
 {
     TEST_CHECK(strcmp(http_mime_type("./home.html"), "text/html") == 0);
@@ -302,5 +390,11 @@ TEST_LIST = {
     {"unknown_header_kept_in_raw_block", test_unknown_header_kept_in_raw_block},
     {"bad_header_lines", test_bad_header_lines},
     {"request_validation", test_request_validation},
+    {"요청 줄 검사에 실패해도 HEAD 메서드는 먼저 저장한다",
+     test_method_saved_before_other_checks},
+    {"Host는 이름[:포트] 또는 [IPv6][:포트] 형식만 받고 나머지는 400이다",
+     test_host_format},
+    {"긴 Connection 값의 맨 뒤에 있는 close도 연결을 닫게 한다",
+     test_connection_close_at_end_of_long_value},
     {"mime", test_mime},
     {NULL, NULL}};

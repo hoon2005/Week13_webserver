@@ -68,7 +68,7 @@ def read_response(f, head_request=False):
 class Server:
     """tiny 하나를 임시 폴더에서 띄우고 끄는 도우미"""
 
-    def __init__(self, *args, new_session=False, port=None, wait=True):
+    def __init__(self, *args, new_session=False, port=None, wait=True, env=None):
         tiny = os.path.join(BUILD_DIR, "tiny")
         adder = os.path.join(BUILD_DIR, "adder")
         for path in (tiny, adder):
@@ -91,6 +91,7 @@ class Server:
             stdout=self.log,
             stderr=subprocess.STDOUT,
             start_new_session=new_session,
+            env=env,
         )
         self.stopped = False
         if wait:
