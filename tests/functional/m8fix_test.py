@@ -297,7 +297,7 @@ class F9QueryAndCgiPathTest(unittest.TestCase):
         cls.server = Server()
         www = cls.server.www
         os.makedirs(os.path.join(www, "docs"))
-        with open(os.path.join(www, "docs", "cgi-bin-notes.html"), "w") as f:
+        with open(os.path.join(www, "docs", "cgi-bin-guide.html"), "w") as f:
             f.write("<p>notes</p>")
         os.makedirs(os.path.join(www, "a", "cgi-bin"))
         script = os.path.join(www, "a", "cgi-bin", "hello")
@@ -322,7 +322,7 @@ class F9QueryAndCgiPathTest(unittest.TestCase):
         self.assertEqual(headers["content-type"], "text/html")
 
     def test_cgi_only_when_first_segment_is_cgi_bin(self):
-        status, _, body = self.server.get("/docs/cgi-bin-notes.html")
+        status, _, body = self.server.get("/docs/cgi-bin-guide.html")
         self.assertEqual(status, 200)
         self.assertEqual(body, b"<p>notes</p>")
         # 첫 조각이 아니면 정적 파일 (동작 변경: 전에는 CGI로 실행됨)
