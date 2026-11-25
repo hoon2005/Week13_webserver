@@ -344,6 +344,30 @@ static void test_host_format(void)
     free(req);
 }
 
+/* F11: 긴 Connection 값의 뒤쪽에 있는 close도 읽음 (RFC 9112 9.6) */
+static void test_connection_close_at_end_of_long_value(void)
+{
+    struct http_request *req = new_request();
+    char headers[1200];
+    char filler[1000];
+
+    for (size_t n = 250; n <= 260; n++) {
+        memset(filler, 'a', n);
+        filler[n] = '\0';
+        snprintf(headers, sizeof(headers), "Host: x\r\nConnection: %s, close\r\n",
+                 filler);
+        TEST_CHECK(parse_request(req, "GET / HTTP/1.1\r\n", headers) == 0);
+        TEST_CHECK_(req->keep_alive == 0, "앞 조각 %zu글자", n);
+    }
+    memset(filler, 'a', 900);
+    filler[900] = '\0';
+    snprintf(headers, sizeof(headers), "Host: x\r\nConnection: %s, keep-alive\r\n",
+             filler);
+    TEST_CHECK(parse_request(req, "GET / HTTP/1.0\r\n", headers) == 0);
+    TEST_CHECK(req->keep_alive == 1);
+    free(req);
+}
+
 static void test_mime(void)
 {
     TEST_CHECK(strcmp(http_mime_type("./home.html"), "text/html") == 0);
@@ -370,5 +394,7 @@ TEST_LIST = {
      test_method_saved_before_other_checks},
     {"Host는 이름[:포트] 또는 [IPv6][:포트] 형식만 받고 나머지는 400이다",
      test_host_format},
+    {"긴 Connection 값의 맨 뒤에 있는 close도 연결을 닫게 한다",
+     test_connection_close_at_end_of_long_value},
     {"mime", test_mime},
     {NULL, NULL}};

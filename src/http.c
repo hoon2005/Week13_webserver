@@ -276,34 +276,34 @@ int http_parse_content_length(const char *value, long *out)
     return 0;
 }
 
-/* Connection 값("keep-alive", "close", "Upgrade, close" 등)을 해석 */
+/*
+ * Connection 값("keep-alive", "close", "Upgrade, close" 등)을 해석.
+ * 복사하지 않고 값 전체를 쉼표로 나눠 훑음: 받아들인 값(헤더 한 줄 8 KiB까지)은
+ * 길이와 상관없이 끝까지 봐서 뒤쪽의 close도 놓치지 않음 (F11, RFC 9112 9.6)
+ */
 static int connection_parse(const char *value)
 {
-    char buf[HTTP_FIELD_MAX];
-    char *save = NULL;
     int result = HTTP_CONN_NONE;
+    const char *p = value;
 
-    size_t n = strlen(value);
+    while (*p != '\0') {
+        const char *t, *e;
 
-    if (n >= sizeof(buf)) {
-        n = sizeof(buf) - 1; /* 아주 긴 값은 앞부분만 봄 */
-    }
-    memcpy(buf, value, n);
-    buf[n] = '\0';
-    for (char *t = strtok_r(buf, ",", &save); t != NULL;
-         t = strtok_r(NULL, ",", &save)) {
-        char *e;
-        while (is_space(*t)) {
-            t++;
+        while (*p == ',' || is_space(*p)) {
+            p++;
         }
-        e = t + strlen(t);
+        t = p;
+        while (*p != '\0' && *p != ',') {
+            p++;
+        }
+        e = p;
         while (e > t && is_space(e[-1])) {
-            *--e = '\0';
+            e--;
         }
-        if (strcasecmp(t, "close") == 0) {
+        if ((size_t)(e - t) == 5 && strncasecmp(t, "close", 5) == 0) {
             return HTTP_CONN_CLOSE; /* close가 있으면 무조건 닫음 */
         }
-        if (strcasecmp(t, "keep-alive") == 0) {
+        if ((size_t)(e - t) == 10 && strncasecmp(t, "keep-alive", 10) == 0) {
             result = HTTP_CONN_KEEP_ALIVE;
         }
     }

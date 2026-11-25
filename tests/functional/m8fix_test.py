@@ -360,5 +360,27 @@ class F10HostFormatTest(unittest.TestCase):
                 self.assertEqual(status, 200)
 
 
+class F11LongConnectionValueTest(unittest.TestCase):
+    """F11: Connection 값의 앞 255바이트만 봐서 뒤쪽의 close를 놓침"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_close_after_long_value_closes_connection(self):
+        for n in (248, 249, 1000):
+            with self.subTest(n=n):
+                value = b"a" * n + b", close"
+                status, headers, _ = self.server.exchange(
+                    b"GET /home.html HTTP/1.1\r\nHost: x\r\nConnection: " + value
+                    + b"\r\n\r\n")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["connection"], "close")
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]], verbosity=2)
