@@ -8,7 +8,7 @@
 
 Krafton Jungle 13주차 팀 프로젝트. C와 POSIX 소켓으로 구현한 HTTP/1.1 웹 서버와 리버스 프록시.
 
-[빠른 시작](#빠른-시작) · [구조와 설계](#3--시스템-구조와-설계-결정) · [시연](#4--시연) · [검증](#5--검증) · [성능 분석](#6--성능-분석) · [검증 실행](#검증-실행-방법) · [문서](#문서)
+[빠른 시작](#빠른-시작) · [구조와 설계](#3--시스템-구조와-설계-결정) · [시연](#4--시연) · [검증](#5--검증) · [성능 분석](#6--성능-분석) · [검증 실행](docs/testing/validation-guide.md#명령어-요약) · [문서](#문서)
 
 ## 1. ⭐ 구현 범위
 
@@ -190,7 +190,7 @@ make
 
 커밋 `8cce3c1`, WSL2 Ubuntu에서 실행한 결과입니다.
 
-[수정 내용 전체](docs/measurements/001-m8-validation.md#발견한-문제와-수정) · [실행 결과](docs/measurements/001-m8-validation.md#테스트-결과) · [직접 실행하기](#검증-실행-방법)
+[수정 내용 전체](docs/measurements/001-m8-validation.md#발견한-문제와-수정) · [실행 결과](docs/measurements/001-m8-validation.md#테스트-결과) · [직접 실행하기](docs/testing/validation-guide.md#명령어-요약)
 
 ## 6. ⭐ 성능 분석
 
@@ -275,71 +275,8 @@ $ curl http://localhost:8000/api/whoami.txt
 
 ### 검증 실행 방법
 
-저장소 루트의 Linux 또는 WSL2 Ubuntu Bash에서 실행합니다. 도구 설치는 [개발 환경](CONVENTION.md#개발-환경)을 참고합니다. `git status --short --branch`로 검증할 브랜치와 수정 파일을 확인합니다. 수정한 파일이 있으면 그 내용도 테스트에 포함됩니다.
-
-#### 빌드별 실행 순서
-
-위에서부터 빌드별로 실행합니다. 개발 빌드에서 만든 CGI 실행 파일을 Release 스트레스 검사에서도 사용합니다. 합격 기준은 아래 표에서 확인합니다.
-
-```bash
-# 1. 개발 빌드: 단위·기능·포맷, 부하 중 메모리 오류·누수
-make verify
-python3 -B tests/stress/soak.py asan-load --conns 32 --seconds 60
-python3 -B tests/stress/soak.py asan-load --conns 32 --seconds 600
-
-# 2. TSan 빌드: 단위 검사, 실제 서버의 동시 요청·종료
-make tsan
-
-# 3. Release 빌드: 기능, 스트레스, 장시간 자원
-make release
-python3 -B tests/test_output.py check functional build/release \
-  --functional tests/functional/baseline_test.py tests/functional/scenario_test.py
-python3 -B tests/stress/stress.py
-python3 -B tests/stress/soak.py long-run --conns 32 --minutes 10 --interval 60
-```
-
-| 검사 | 합격 기준 |
-|---|---|
-| 개발 단위·기능·포맷 | 단위 29개와 기능 101개 및 포맷 검사 통과 |
-| 개발 부하·누수 (1분·10분) | 요청 오류 0건, 서버 정상 종료, 메모리 오류·누수 보고 없음 |
-| TSan | 단위 검사와 서버 검사 통과, 데이터 경합 보고 없음 |
-| Release 기능 | 기능 테스트 통과 |
-| Release 스트레스 (약 2분 30초) | 5개 항목에 표시된 `기대`와 `결과`를 직접 대조 |
-| Release 장시간 자원 (10분) | 요청 오류 0건. 부하가 끝나면 열린 파일·소켓, 스레드, 좀비 수가 처음과 같고, 메모리 사용량이 매 기록마다 연속 증가하지 않음 |
-
-스트레스 검사의 `[수동 확인]`은 판정을 직접 내려야 한다는 뜻입니다. 예를 들어 느린 CGI 16건이 모두 `504`로 끝나고 정적 파일 요청이 `200`이면 기대한 동작입니다. [스트레스 5개 판정 기준](docs/testing/validation-guide.md#스트레스-결과-대조)
-
-#### 성능 측정
-
-성능을 다시 잴 때는 다른 테스트가 끝난 뒤 실행합니다. `wrk`와 `ab`가 필요합니다.
-
-```bash
-# 전체 측정: 처리량, p50, p99 (약 30분)
-make load
-
-# 6장의 실험 B만 재현: 동시 접속 32개에서 작업 스레드 수 비교
-python3 -B tests/stress/load.py threads --sat-conns 32
-```
-
-`make load`는 작은 정적 파일의 측정 결과에서 스레드 비교에 쓸 접속 수를 자동으로 고릅니다. README의 실험 B와 같은 32개 조건이 필요하면 두 번째 명령을 사용합니다.
-
-#### 결과 확인과 저장
-
-- **테스트 실행 로그**는 기본적으로 터미널에 표시됩니다. 파일로 남기려면 같은 Bash에서 아래 준비 명령을 한 번 실행하고, 저장할 명령 앞에 `run_check <로그 이름>`을 붙입니다. 실행이 끝나면 `원본 로그:`에 표시된 경로를 엽니다.
-- **성능 측정 결과**는 `build/load/<시각>/`에 자동 저장됩니다. 이번 본 측정이 출력한 `결과:` 경로의 `report.md`에서 숫자를, `report.html`에서 그래프를 확인합니다. `results.json`은 재분석에 쓰는 원본 데이터입니다.
-- 필요한 기록이 있으면 `make clean` 전에 보관합니다. `make clean`은 로그와 성능 결과가 있는 `build/`를 지웁니다.
-
-```bash
-LOGDIR="build/validation/$(date -u +%Y%m%d-%H%M%SZ)"
-run_check() {
-  python3 -B tests/test_output.py run "$LOGDIR" "$@"
-}
-
-# 로그 저장 예시: 위의 make verify를 이 줄로 실행
-run_check dev-verify make verify
-```
-
-CI는 Ubuntu와 macOS에서 `make verify`와 `make tsan`을 실행합니다. 세부 판정 기준과 환경 기록 방법은 [검증 실행 가이드](docs/testing/validation-guide.md), 실제 통과 결과와 성능 수치는 [M8 검증 기록](docs/measurements/001-m8-validation.md#테스트-결과)에 있습니다.
+- `make verify`로 단위·기능 테스트와 포맷을 확인하고, `make tsan`으로 데이터 경합을 검사합니다. CI도 Ubuntu와 macOS에서 두 명령을 실행합니다.
+- 전체 실행 순서, 복사할 명령, 합격 기준과 로그 저장 위치는 [검증 실행 가이드](docs/testing/validation-guide.md#명령어-요약)에 있습니다.
 
 ## 8. 마일스톤과 참고 자료
 
