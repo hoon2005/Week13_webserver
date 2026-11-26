@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'><title>부하 측정 결과</title>
+<style>body{font-family:sans-serif;max-width:1000px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #ccc;padding:3px 8px;text-align:right}pre{background:#f6f6f6;padding:1em;overflow:auto}.pass{color:#1f9d55}.fail{color:#c0392b}</style></head><body>
+<h1>부하 측정 결과</h1><p>2026-11-26T13:14:21, 커밋 2af47e7, 코어 24개</p>
+<h2>판정</h2><ul>
+<li class='pass'>load-b-threads: 통과. -c 32에서 --threads 16일 때 최고 71177 req/s (p99 23.14ms)</li>
+</ul>
+<svg viewBox="0 0 640 300" width="640" height="300" font-family="sans-serif" font-size="12">
+<text x="70" y="18" font-weight="bold">작업 스레드 수에 따른 초당 처리 건수 (-c 32)</text>
+<line x1="70" x2="500" y1="255.0" y2="255.0" stroke="#ddd"/>
+<text x="64" y="259.0" text-anchor="end">0</text>
+<line x1="70" x2="500" y1="198.8" y2="198.8" stroke="#ddd"/>
+<text x="64" y="202.8" text-anchor="end">19574</text>
+<line x1="70" x2="500" y1="142.5" y2="142.5" stroke="#ddd"/>
+<text x="64" y="146.5" text-anchor="end">39147</text>
+<line x1="70" x2="500" y1="86.2" y2="86.2" stroke="#ddd"/>
+<text x="64" y="90.2" text-anchor="end">58721</text>
+<line x1="70" x2="500" y1="30.0" y2="30.0" stroke="#ddd"/>
+<text x="64" y="34.0" text-anchor="end">78295</text>
+<text x="70.0" y="271" text-anchor="middle">16</text>
+<text x="500.0" y="271" text-anchor="middle">32</text>
+<text x="285" y="294" text-anchor="middle">--threads</text>
+<text x="14" y="142" transform="rotate(-90 14 142)" text-anchor="middle">req/s</text>
+<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,50.5 500.0,65.1"/>
+<circle cx="70.0" cy="50.5" r="3" fill="#2a6fdb"/>
+<circle cx="500.0" cy="65.1" r="3" fill="#2a6fdb"/>
+<rect x="514" y="40" width="12" height="3" fill="#2a6fdb"/>
+<text x="530" y="45">req/s</text>
+</svg>
+<h2>표 전체 (report.md)</h2><pre># 부하 측정 결과
+
+- 시각: 2026-11-26T13:14:21
+- 커밋: 2af47e7
+- 코어 수: 24, 측정 10초 x 1회 (워밍업 3초), wrk 스레드 2
+- 지연 시간 단위는 ms. ab의 p50, p99는 ms 정수로만 나옴
+
+## load-b-threads: 작업 스레드 수 효과 (home.html, -c 32)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0, 0])
+
+| --threads | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 16 | 71176.9 | 71176.9 | 15.88 | 0.336 | 23.140 | 0 | 260.6 | 71.0 |  |
+| 32 | 66074.2 | 66074.2 | 14.74 | 0.515 | 1.620 | 0 | 230.4 | 67.5 |  |
+
+## 시나리오 표에 옮길 실제 결과
+
+- load-b-threads: 통과. -c 32에서 --threads 16일 때 최고 71177 req/s (p99 23.14ms)
+</pre></body></html>

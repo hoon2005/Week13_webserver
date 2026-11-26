@@ -1,0 +1,78 @@
+{
+  "started": "2026-11-26T13:16:10",
+  "commit": "2af47e7",
+  "ncpu": 24,
+  "args": {
+    "duration": 10,
+    "warmup": 3,
+    "runs": 1,
+    "conns": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128,
+      256
+    ],
+    "threads_list": [
+      16,
+      32
+    ],
+    "sat_conns": 32,
+    "wrk_threads": 2,
+    "tool_timeout": 10,
+    "quick": false
+  },
+  "measurements": {
+    "threads": {
+      "points": [
+        {
+          "rps": 73547.14,
+          "mib_per_sec": 16.41,
+          "p50": 0.331,
+          "p99": 22.08,
+          "errors": 0,
+          "server_cpu": 254.1,
+          "tool_cpu": 66.8,
+          "tool_threads": 2,
+          "conns": 32,
+          "rps_runs": [
+            73547.1
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 16
+        },
+        {
+          "rps": 66894.43,
+          "mib_per_sec": 14.93,
+          "p50": 0.506,
+          "p99": 1.6,
+          "errors": 0,
+          "server_cpu": 225.4,
+          "tool_cpu": 67.6,
+          "tool_threads": 2,
+          "conns": 32,
+          "rps_runs": [
+            66894.4
+          ],
+          "tool_limited": false,
+          "cpu_shared": false,
+          "threads": 32
+        }
+      ],
+      "stop_codes": [
+        0,
+        0
+      ],
+      "conns": 32,
+      "id": "load-b-threads",
+      "desc": "작업 스레드 수 효과 (home.html, -c 32)",
+      "errors": 0,
+      "passed": true
+    }
+  }
+}
