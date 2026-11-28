@@ -44,7 +44,9 @@ def diagnose(servers):
             cmd = ["gdb", "-p", str(server.proc.pid), "-batch", "-ex", "thread apply all bt"]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            out.append("-- 스레드 스택 (%s)\n%s" % (cmd[0], (r.stdout + r.stderr)[-12000:]))
+            # sample 출력의 끝은 라이브러리 목록이라, 그 앞의 스레드 스택만 앞에서부터 남김
+            stacks = (r.stdout + r.stderr).split("Binary Images:")[0]
+            out.append("-- 스레드 스택 (%s)\n%s" % (cmd[0], stacks[:20000]))
         except (OSError, subprocess.TimeoutExpired) as e:
             out.append("-- 스레드 스택을 못 얻음: %r" % e)
     return "\n".join(out)
@@ -59,13 +61,20 @@ class TsanServerTest(unittest.TestCase):
         proxy = Server("--route", "/api=127.0.0.1:%d" % backend.port, env=ENV)
         servers = (("proxy", proxy), ("backend", backend))
         paths = ("/home.html", "/cgi-bin/adder?1&2", "/api/home.html")
+        # macOS의 TSan은 다른 스레드가 도는 중에 CGI용 fork를 하면 서버 전체가 멈출 수
+        # 있어(macOS CI에서 재현), 동시 단계에서는 CGI를 뺌. CGI는 아래 순차 단계에서
+        # 검사하고, fork와 동시 요청이 겹치는 경우는 Linux CI가 검사함
+        if sys.platform == "darwin":
+            concurrent_paths = ("/home.html", "/api/home.html")
+        else:
+            concurrent_paths = paths
         results = []
         lock = threading.Lock()
 
         def worker(i):
             for j in range(6):
                 try:
-                    status = get(proxy, paths[(i + j) % 3])
+                    status = get(proxy, concurrent_paths[(i + j) % len(concurrent_paths)])
                 except OSError as e:
                     status = repr(e)
                 with lock:
