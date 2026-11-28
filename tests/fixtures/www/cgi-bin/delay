@@ -1,0 +1,4 @@
+#!/bin/sh
+# 테스트용 CGI: 1초 뒤에 응답 → 실행 중에 종료 신호를 보내는 테스트 (m6m7.md 7장)
+sleep 1
+printf "Content-type: text/plain\r\n\r\ndelayed\n"

@@ -33,7 +33,7 @@
 | python3 | 기능 테스트 | Ubuntu: 기본으로 있습니다 / macOS: 위의 `xcode-select --install`로 함께 설치됩니다 |
 | clang-format 21.1.8 | `make lint`, `make format` | `pipx install clang-format==21.1.8` |
 | curl | 기능 확인 | Ubuntu: `sudo apt install curl` / macOS: 기본으로 있습니다 |
-| wrk 또는 ab | 부하 테스트 | Ubuntu: `sudo apt install wrk apache2-utils` / macOS: `brew install wrk` |
+| wrk, ab | 부하 테스트 (`make load`는 둘 다 필요) | Ubuntu: `sudo apt install wrk apache2-utils` / macOS: `brew install wrk` (ab는 있는지 `command -v ab`로 확인) |
 
 - macOS의 `brew` 명령은 Homebrew가 있어야 동작합니다. Homebrew는 macOS에 기본으로 들어 있지 않으므로, 없으면 https://brew.sh 안내대로 먼저 설치합니다.
 - pipx가 없으면 Ubuntu는 `sudo apt install pipx`, macOS는 `brew install pipx`로 설치하고 `pipx ensurepath`를 한 번 실행합니다. 그다음 터미널을 새로 엽니다.
@@ -56,7 +56,8 @@ make lint       # 코드 모양 검사. 위반이나 설정 오류가 있으면 
 make format     # 코드 모양 자동 수정
 make verify     # CI와 같은 전체 검증
 make release    # 부하 테스트용 -O2 빌드 (sanitizer 없음)
-make tsan       # 단위 테스트를 ThreadSanitizer로 실행
+make load       # 부하 측정 전부 (wrk, ab 필요, 30분쯤)
+make tsan       # 단위·서버 동시성 테스트를 ThreadSanitizer로 실행
 make help       # 명령 목록
 ```
 
@@ -74,8 +75,11 @@ make help       # 명령 목록
 | `src/main/<이름>.c` | `main()`이 있는 파일 하나가 실행 파일 하나입니다 | `build/<이름>` |
 | `tests/<모듈>_test.c` | 모듈 하나의 단위 테스트 | `build/test/<모듈>_test` |
 | `tests/functional/<이름>_test.py` | 실행 파일을 띄워 바깥에서 요청을 보내는 기능 테스트. 첫 인자로 `build` 폴더 경로를 받습니다 | 없음 |
+| `tests/tsan/server_tsan.py` | TSan으로 빌드한 서버의 동시 요청·종료 검사. `make tsan`이 실행합니다 | 없음 |
+| `tests/stress/*.py` | 부하, 장시간 자원, 스트레스 검사. `make verify`에는 들어가지 않습니다 | 없음 |
+| `tests/test_output.py`, `tests/test_scenarios.json` | 테스트 출력 정리와 원본 로그 저장, 출력에 쓰는 시나리오 설명 | 없음 |
 
-파일을 추가하면 Makefile을 고치지 않아도 빌드 대상에 들어갑니다. 단, `src/main/`의 파일 이름은 `build/` 아래 폴더 이름(`obj`, `test`, `release`, `tsan`)과 겹치면 안 됩니다.
+파일을 추가하면 Makefile을 고치지 않아도 빌드 대상에 들어갑니다. 단, `src/main/`의 파일 이름은 `build/` 아래 폴더 이름(`obj`, `test`, `release`, `tsan`, `load`, `validation`)과 겹치면 안 됩니다.
 
 ## 코드
 
@@ -85,7 +89,7 @@ make help       # 명령 목록
 
 - **에디터:** clangd를 쓰면 `compile_flags.txt`를 읽고 빌드와 같은 옵션으로 경고를 보여 줍니다. `.editorconfig`는 줄바꿈, 들여쓰기, 파일 끝 줄바꿈을 맞춥니다.
 - **검사 대상:** `make lint`와 `make format`은 git이 아는 파일만 봅니다. 새 파일은 `git add`한 뒤에 검사됩니다.
-- **가져온 코드:** `.clang-format-ignore`에 적은 파일(`tests/acutest.h`)은 clang-format이 건너뜁니다. 원본과 대조할 수 있게 원래 모양을 지킵니다.
+- **가져온 코드:** `.clang-format-ignore`에 적은 파일(`tests/acutest.h`, `src/csapp.c`, `src/csapp.h`)은 clang-format이 건너뜁니다. 원본과 대조할 수 있게 원래 모양을 지킵니다.
 - **외부 라이브러리:** LMS가 완성된 HTTP 또는 이벤트 루프 라이브러리(libevent, libuv, mongoose 등)를 금지합니다. 표준 C 라이브러리와 POSIX API만 씁니다. 테스트 도구(`acutest.h`)는 제품 코드에 링크하지 않습니다.
 - **줄바꿈:** `.gitattributes`가 모든 텍스트 파일을 LF로 고정합니다. Windows에서 받은 파일이 CRLF이면 WSL의 `make`와 Python 스크립트가 깨지기 때문입니다.
 
@@ -145,7 +149,7 @@ make help       # 명령 목록
 | 내용 | 남는 곳 |
 | ---- | ------- |
 | 개인 PRD 초안과 최종 PRD, 결정과 그 이유 | `docs/prd/` (작성 방법은 `docs/prd/README.md`) |
-| 부하 테스트 등 측정 결과 | `docs/measurements/<세 자리 번호>-<이름>-<주제>.md` |
+| 부하 테스트 등 측정 결과 | `docs/measurements/<세 자리 번호>-<이름>-<주제>.md`. 팀 공식 기록은 이름을 뺀 `<세 자리 번호>-<주제>.md`, 원본은 같은 이름의 폴더 |
 | 작은 이유 | 그 코드 줄의 주석 |
 | 엣지 케이스 | 테스트 이름 |
 | 확정된 팀 규칙 | 이 파일 |

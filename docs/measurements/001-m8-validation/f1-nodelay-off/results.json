@@ -1,0 +1,56 @@
+{
+  "started": "2026-11-26T06:21:44",
+  "commit": "?",
+  "ncpu": 24,
+  "args": {
+    "duration": 10,
+    "warmup": 3,
+    "runs": 3,
+    "conns": [
+      10
+    ],
+    "threads_list": [
+      1,
+      4,
+      8,
+      16,
+      32
+    ],
+    "sat_conns": null,
+    "wrk_threads": 2,
+    "tool_timeout": 10,
+    "quick": false
+  },
+  "measurements": {
+    "static-small": {
+      "points": [
+        {
+          "rps": 231.81,
+          "mib_per_sec": 0.05,
+          "p50": 43.98,
+          "p99": 44.29,
+          "errors": 0,
+          "server_cpu": 2.1,
+          "tool_cpu": 0.5,
+          "tool_threads": 2,
+          "conns": 10,
+          "rps_runs": [
+            231.9,
+            231.8,
+            231.8
+          ],
+          "tool_limited": false,
+          "cpu_shared": false
+        }
+      ],
+      "stop_codes": [
+        0
+      ],
+      "saturation": 10,
+      "id": "load-a-static-small",
+      "desc": "작은 정적 파일 (home.html)",
+      "errors": 0,
+      "passed": true
+    }
+  }
+}

@@ -1,0 +1,319 @@
+<!DOCTYPE html><html lang='ko'><head><meta charset='utf-8'><title>부하 측정 결과</title>
+<style>body{font-family:sans-serif;max-width:1000px;margin:2em auto;padding:0 1em}table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #ccc;padding:3px 8px;text-align:right}pre{background:#f6f6f6;padding:1em;overflow:auto}.pass{color:#1f9d55}.fail{color:#c0392b}</style></head><body>
+<h1>부하 측정 결과</h1><p>2026-11-26T05:16:38, 커밋 ac670ba, 코어 24개</p>
+<h2>판정</h2><ul>
+<li class='pass'>load-a-static-small: 통과. 최고 79523 req/s (-c 4, p50 0.04ms, p99 0.13ms), 포화 지점 -c 4</li>
+<li class='pass'>load-a-static-large: 통과. 최고 18859 req/s (-c 8, p50 0.35ms, p99 0.83ms), 전송량 18862 MiB/s, 도구 한계 구간 -c 8</li>
+<li class='pass'>load-a-cgi: 통과. 최고 4624 req/s (-c 16, p50 3.31ms, p99 8.54ms)</li>
+<li class='pass'>load-a-proxy: 통과. 최고 65349 req/s (-c 128, p50 0.37ms, p99 168.71ms)</li>
+<li class='pass'>load-b-threads: 통과. -c 4에서 --threads 4일 때 최고 81138 req/s (p99 0.13ms)</li>
+<li class='pass'>load-keepalive-off: 통과. 최고 58003 req/s (-c 128, p50 2.00ms, p99 3.00ms), 포화 지점 -c 32, 도구 한계 구간 -c 8 16 32 64 128 256</li>
+</ul>
+<svg viewBox="0 0 640 300" width="640" height="300" font-family="sans-serif" font-size="12">
+<text x="70" y="18" font-weight="bold">동시 접속 수에 따른 초당 처리 건수</text>
+<line x1="70" x2="500" y1="255.0" y2="255.0" stroke="#ddd"/>
+<text x="64" y="259.0" text-anchor="end">0</text>
+<line x1="70" x2="500" y1="198.8" y2="198.8" stroke="#ddd"/>
+<text x="64" y="202.8" text-anchor="end">21869</text>
+<line x1="70" x2="500" y1="142.5" y2="142.5" stroke="#ddd"/>
+<text x="64" y="146.5" text-anchor="end">43738</text>
+<line x1="70" x2="500" y1="86.2" y2="86.2" stroke="#ddd"/>
+<text x="64" y="90.2" text-anchor="end">65606</text>
+<line x1="70" x2="500" y1="30.0" y2="30.0" stroke="#ddd"/>
+<text x="64" y="34.0" text-anchor="end">87475</text>
+<text x="70.0" y="271" text-anchor="middle">1</text>
+<text x="123.8" y="271" text-anchor="middle">2</text>
+<text x="177.5" y="271" text-anchor="middle">4</text>
+<text x="231.2" y="271" text-anchor="middle">8</text>
+<text x="285.0" y="271" text-anchor="middle">16</text>
+<text x="338.8" y="271" text-anchor="middle">32</text>
+<text x="392.5" y="271" text-anchor="middle">64</text>
+<text x="446.2" y="271" text-anchor="middle">128</text>
+<text x="500.0" y="271" text-anchor="middle">256</text>
+<text x="285" y="294" text-anchor="middle">-c (동시 접속 수)</text>
+<text x="14" y="142" transform="rotate(-90 14 142)" text-anchor="middle">req/s</text>
+<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,177.6 123.8,128.2 177.5,50.5 231.2,70.6 285.0,71.8 338.8,72.3 392.5,77.5 446.2,74.4 500.0,76.0"/>
+<circle cx="70.0" cy="177.6" r="3" fill="#2a6fdb"/>
+<circle cx="123.8" cy="128.2" r="3" fill="#2a6fdb"/>
+<circle cx="177.5" cy="50.5" r="3" fill="#2a6fdb"/>
+<circle cx="231.2" cy="70.6" r="3" fill="#2a6fdb"/>
+<circle cx="285.0" cy="71.8" r="3" fill="#2a6fdb"/>
+<circle cx="338.8" cy="72.3" r="3" fill="#2a6fdb"/>
+<circle cx="392.5" cy="77.5" r="3" fill="#2a6fdb"/>
+<circle cx="446.2" cy="74.4" r="3" fill="#2a6fdb"/>
+<circle cx="500.0" cy="76.0" r="3" fill="#2a6fdb"/>
+<rect x="514" y="40" width="12" height="3" fill="#2a6fdb"/>
+<text x="530" y="45">a-static-small</text>
+<polyline fill="none" stroke="#d9822b" stroke-width="2" points="70.0,241.0 123.8,230.0 177.5,215.3 231.2,206.5 285.0,210.8 338.8,212.7 392.5,211.5 446.2,211.8 500.0,216.1"/>
+<circle cx="70.0" cy="241.0" r="3" fill="#d9822b"/>
+<circle cx="123.8" cy="230.0" r="3" fill="#d9822b"/>
+<circle cx="177.5" cy="215.3" r="3" fill="#d9822b"/>
+<circle cx="231.2" cy="206.5" r="3" fill="#d9822b"/>
+<circle cx="285.0" cy="210.8" r="3" fill="#d9822b"/>
+<circle cx="338.8" cy="212.7" r="3" fill="#d9822b"/>
+<circle cx="392.5" cy="211.5" r="3" fill="#d9822b"/>
+<circle cx="446.2" cy="211.8" r="3" fill="#d9822b"/>
+<circle cx="500.0" cy="216.1" r="3" fill="#d9822b"/>
+<rect x="514" y="58" width="12" height="3" fill="#d9822b"/>
+<text x="530" y="63">a-static-large</text>
+<polyline fill="none" stroke="#1f9d55" stroke-width="2" points="70.0,250.9 123.8,248.0 177.5,244.3 231.2,243.1 285.0,243.1 338.8,243.5 392.5,243.4 446.2,243.3 500.0,243.5"/>
+<circle cx="70.0" cy="250.9" r="3" fill="#1f9d55"/>
+<circle cx="123.8" cy="248.0" r="3" fill="#1f9d55"/>
+<circle cx="177.5" cy="244.3" r="3" fill="#1f9d55"/>
+<circle cx="231.2" cy="243.1" r="3" fill="#1f9d55"/>
+<circle cx="285.0" cy="243.1" r="3" fill="#1f9d55"/>
+<circle cx="338.8" cy="243.5" r="3" fill="#1f9d55"/>
+<circle cx="392.5" cy="243.4" r="3" fill="#1f9d55"/>
+<circle cx="446.2" cy="243.3" r="3" fill="#1f9d55"/>
+<circle cx="500.0" cy="243.5" r="3" fill="#1f9d55"/>
+<rect x="514" y="76" width="12" height="3" fill="#1f9d55"/>
+<text x="530" y="81">a-cgi</text>
+<polyline fill="none" stroke="#c0392b" stroke-width="2" points="70.0,230.9 123.8,206.4 177.5,164.4 231.2,120.1 285.0,108.3 338.8,102.2 392.5,94.0 446.2,86.9 500.0,87.0"/>
+<circle cx="70.0" cy="230.9" r="3" fill="#c0392b"/>
+<circle cx="123.8" cy="206.4" r="3" fill="#c0392b"/>
+<circle cx="177.5" cy="164.4" r="3" fill="#c0392b"/>
+<circle cx="231.2" cy="120.1" r="3" fill="#c0392b"/>
+<circle cx="285.0" cy="108.3" r="3" fill="#c0392b"/>
+<circle cx="338.8" cy="102.2" r="3" fill="#c0392b"/>
+<circle cx="392.5" cy="94.0" r="3" fill="#c0392b"/>
+<circle cx="446.2" cy="86.9" r="3" fill="#c0392b"/>
+<circle cx="500.0" cy="87.0" r="3" fill="#c0392b"/>
+<rect x="514" y="94" width="12" height="3" fill="#c0392b"/>
+<text x="530" y="99">a-proxy</text>
+<polyline fill="none" stroke="#8e44ad" stroke-width="2" points="70.0,220.3 123.8,184.0 177.5,144.4 231.2,119.5 285.0,121.4 338.8,109.3 392.5,110.4 446.2,105.8 500.0,107.7"/>
+<circle cx="70.0" cy="220.3" r="3" fill="#8e44ad"/>
+<circle cx="123.8" cy="184.0" r="3" fill="#8e44ad"/>
+<circle cx="177.5" cy="144.4" r="3" fill="#8e44ad"/>
+<circle cx="231.2" cy="119.5" r="3" fill="#8e44ad"/>
+<circle cx="285.0" cy="121.4" r="3" fill="#8e44ad"/>
+<circle cx="338.8" cy="109.3" r="3" fill="#8e44ad"/>
+<circle cx="392.5" cy="110.4" r="3" fill="#8e44ad"/>
+<circle cx="446.2" cy="105.8" r="3" fill="#8e44ad"/>
+<circle cx="500.0" cy="107.7" r="3" fill="#8e44ad"/>
+<rect x="514" y="112" width="12" height="3" fill="#8e44ad"/>
+<text x="530" y="117">keepalive-off</text>
+</svg>
+<svg viewBox="0 0 640 300" width="640" height="300" font-family="sans-serif" font-size="12">
+<text x="70" y="18" font-weight="bold">동시 접속 수에 따른 p99 지연 (ms)</text>
+<line x1="70" x2="500" y1="255.0" y2="255.0" stroke="#ddd"/>
+<text x="64" y="259.0" text-anchor="end">0</text>
+<line x1="70" x2="500" y1="198.8" y2="198.8" stroke="#ddd"/>
+<text x="64" y="202.8" text-anchor="end">1408</text>
+<line x1="70" x2="500" y1="142.5" y2="142.5" stroke="#ddd"/>
+<text x="64" y="146.5" text-anchor="end">2816</text>
+<line x1="70" x2="500" y1="86.2" y2="86.2" stroke="#ddd"/>
+<text x="64" y="90.2" text-anchor="end">4224</text>
+<line x1="70" x2="500" y1="30.0" y2="30.0" stroke="#ddd"/>
+<text x="64" y="34.0" text-anchor="end">5632</text>
+<text x="70.0" y="271" text-anchor="middle">1</text>
+<text x="123.8" y="271" text-anchor="middle">2</text>
+<text x="177.5" y="271" text-anchor="middle">4</text>
+<text x="231.2" y="271" text-anchor="middle">8</text>
+<text x="285.0" y="271" text-anchor="middle">16</text>
+<text x="338.8" y="271" text-anchor="middle">32</text>
+<text x="392.5" y="271" text-anchor="middle">64</text>
+<text x="446.2" y="271" text-anchor="middle">128</text>
+<text x="500.0" y="271" text-anchor="middle">256</text>
+<text x="285" y="294" text-anchor="middle">-c (동시 접속 수)</text>
+<text x="14" y="142" transform="rotate(-90 14 142)" text-anchor="middle">ms</text>
+<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,255.0 123.8,255.0 177.5,255.0 231.2,255.0 285.0,255.0 338.8,254.1 392.5,252.2 446.2,248.7 500.0,241.5"/>
+<circle cx="70.0" cy="255.0" r="3" fill="#2a6fdb"/>
+<circle cx="123.8" cy="255.0" r="3" fill="#2a6fdb"/>
+<circle cx="177.5" cy="255.0" r="3" fill="#2a6fdb"/>
+<circle cx="231.2" cy="255.0" r="3" fill="#2a6fdb"/>
+<circle cx="285.0" cy="255.0" r="3" fill="#2a6fdb"/>
+<circle cx="338.8" cy="254.1" r="3" fill="#2a6fdb"/>
+<circle cx="392.5" cy="252.2" r="3" fill="#2a6fdb"/>
+<circle cx="446.2" cy="248.7" r="3" fill="#2a6fdb"/>
+<circle cx="500.0" cy="241.5" r="3" fill="#2a6fdb"/>
+<rect x="514" y="40" width="12" height="3" fill="#2a6fdb"/>
+<text x="530" y="45">a-static-small</text>
+<polyline fill="none" stroke="#d9822b" stroke-width="2" points="70.0,255.0 123.8,255.0 177.5,255.0 231.2,255.0 285.0,254.9 338.8,251.1 392.5,243.4 446.2,228.3 500.0,192.7"/>
+<circle cx="70.0" cy="255.0" r="3" fill="#d9822b"/>
+<circle cx="123.8" cy="255.0" r="3" fill="#d9822b"/>
+<circle cx="177.5" cy="255.0" r="3" fill="#d9822b"/>
+<circle cx="231.2" cy="255.0" r="3" fill="#d9822b"/>
+<circle cx="285.0" cy="254.9" r="3" fill="#d9822b"/>
+<circle cx="338.8" cy="251.1" r="3" fill="#d9822b"/>
+<circle cx="392.5" cy="243.4" r="3" fill="#d9822b"/>
+<circle cx="446.2" cy="228.3" r="3" fill="#d9822b"/>
+<circle cx="500.0" cy="192.7" r="3" fill="#d9822b"/>
+<rect x="514" y="58" width="12" height="3" fill="#d9822b"/>
+<text x="530" y="63">a-static-large</text>
+<polyline fill="none" stroke="#1f9d55" stroke-width="2" points="70.0,254.8 123.8,254.8 177.5,254.8 231.2,254.7 285.0,254.7 338.8,240.7 392.5,212.7 446.2,158.7 500.0,50.5"/>
+<circle cx="70.0" cy="254.8" r="3" fill="#1f9d55"/>
+<circle cx="123.8" cy="254.8" r="3" fill="#1f9d55"/>
+<circle cx="177.5" cy="254.8" r="3" fill="#1f9d55"/>
+<circle cx="231.2" cy="254.7" r="3" fill="#1f9d55"/>
+<circle cx="285.0" cy="254.7" r="3" fill="#1f9d55"/>
+<circle cx="338.8" cy="240.7" r="3" fill="#1f9d55"/>
+<circle cx="392.5" cy="212.7" r="3" fill="#1f9d55"/>
+<circle cx="446.2" cy="158.7" r="3" fill="#1f9d55"/>
+<circle cx="500.0" cy="50.5" r="3" fill="#1f9d55"/>
+<rect x="514" y="76" width="12" height="3" fill="#1f9d55"/>
+<text x="530" y="81">a-cgi</text>
+<polyline fill="none" stroke="#c0392b" stroke-width="2" points="70.0,255.0 123.8,255.0 177.5,255.0 231.2,255.0 285.0,255.0 338.8,253.7 392.5,251.8 446.2,248.3 500.0,240.6"/>
+<circle cx="70.0" cy="255.0" r="3" fill="#c0392b"/>
+<circle cx="123.8" cy="255.0" r="3" fill="#c0392b"/>
+<circle cx="177.5" cy="255.0" r="3" fill="#c0392b"/>
+<circle cx="231.2" cy="255.0" r="3" fill="#c0392b"/>
+<circle cx="285.0" cy="255.0" r="3" fill="#c0392b"/>
+<circle cx="338.8" cy="253.7" r="3" fill="#c0392b"/>
+<circle cx="392.5" cy="251.8" r="3" fill="#c0392b"/>
+<circle cx="446.2" cy="248.3" r="3" fill="#c0392b"/>
+<circle cx="500.0" cy="240.6" r="3" fill="#c0392b"/>
+<rect x="514" y="94" width="12" height="3" fill="#c0392b"/>
+<text x="530" y="99">a-proxy</text>
+<polyline fill="none" stroke="#8e44ad" stroke-width="2" points="70.0,255.0 123.8,255.0 177.5,255.0 231.2,255.0 285.0,255.0 338.8,255.0 392.5,255.0 446.2,254.9 500.0,254.8"/>
+<circle cx="70.0" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="123.8" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="177.5" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="231.2" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="285.0" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="338.8" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="392.5" cy="255.0" r="3" fill="#8e44ad"/>
+<circle cx="446.2" cy="254.9" r="3" fill="#8e44ad"/>
+<circle cx="500.0" cy="254.8" r="3" fill="#8e44ad"/>
+<rect x="514" y="112" width="12" height="3" fill="#8e44ad"/>
+<text x="530" y="117">keepalive-off</text>
+</svg>
+<svg viewBox="0 0 640 300" width="640" height="300" font-family="sans-serif" font-size="12">
+<text x="70" y="18" font-weight="bold">작업 스레드 수에 따른 초당 처리 건수 (-c 4)</text>
+<line x1="70" x2="500" y1="255.0" y2="255.0" stroke="#ddd"/>
+<text x="64" y="259.0" text-anchor="end">0</text>
+<line x1="70" x2="500" y1="198.8" y2="198.8" stroke="#ddd"/>
+<text x="64" y="202.8" text-anchor="end">22313</text>
+<line x1="70" x2="500" y1="142.5" y2="142.5" stroke="#ddd"/>
+<text x="64" y="146.5" text-anchor="end">44626</text>
+<line x1="70" x2="500" y1="86.2" y2="86.2" stroke="#ddd"/>
+<text x="64" y="90.2" text-anchor="end">66939</text>
+<line x1="70" x2="500" y1="30.0" y2="30.0" stroke="#ddd"/>
+<text x="64" y="34.0" text-anchor="end">89252</text>
+<text x="70.0" y="271" text-anchor="middle">1</text>
+<text x="242.0" y="271" text-anchor="middle">4</text>
+<text x="328.0" y="271" text-anchor="middle">8</text>
+<text x="414.0" y="271" text-anchor="middle">16</text>
+<text x="500.0" y="271" text-anchor="middle">32</text>
+<text x="285" y="294" text-anchor="middle">--threads</text>
+<text x="14" y="142" transform="rotate(-90 14 142)" text-anchor="middle">req/s</text>
+<polyline fill="none" stroke="#2a6fdb" stroke-width="2" points="70.0,174.8 242.0,50.5 328.0,59.3 414.0,52.4 500.0,60.3"/>
+<circle cx="70.0" cy="174.8" r="3" fill="#2a6fdb"/>
+<circle cx="242.0" cy="50.5" r="3" fill="#2a6fdb"/>
+<circle cx="328.0" cy="59.3" r="3" fill="#2a6fdb"/>
+<circle cx="414.0" cy="52.4" r="3" fill="#2a6fdb"/>
+<circle cx="500.0" cy="60.3" r="3" fill="#2a6fdb"/>
+<rect x="514" y="40" width="12" height="3" fill="#2a6fdb"/>
+<text x="530" y="45">req/s</text>
+</svg>
+<h2>표 전체 (report.md)</h2><pre># 부하 측정 결과
+
+- 시각: 2026-11-26T05:16:38
+- 커밋: ac670ba
+- 코어 수: 24, 측정 10초 x 3회 (워밍업 3초), wrk 스레드 2
+- 지연 시간 단위는 ms. ab의 p50, p99는 ms 정수로만 나옴
+
+## load-a-static-small: 작은 정적 파일 (home.html)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0])
+
+포화 지점: -c 4
+
+| -c | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 30093.7 | 30093.7 / 29711.0 / 30822.0 | 6.71 | 0.029 | 0.136 | 0 | 51.8 | 26.1 |  |
+| 2 | 49314.3 | 49764.5 / 49092.3 / 49314.3 | 11.00 | 0.038 | 0.107 | 0 | 101.0 | 51.6 |  |
+| 4 | 79523.0 | 82089.7 / 76801.8 / 79523.0 | 17.74 | 0.043 | 0.131 | 0 | 203.3 | 73.2 |  |
+| 8 | 71694.4 | 71997.6 / 68558.9 / 71694.4 | 16.00 | 0.096 | 0.325 | 0 | 244.4 | 77.7 |  |
+| 16 | 71231.2 | 71231.2 / 71190.6 / 72164.8 | 15.89 | 0.227 | 0.743 | 0 | 247.1 | 72.1 |  |
+| 32 | 71024.3 | 73131.4 / 69155.6 / 71024.3 | 15.85 | 0.338 | 22.810 | 0 | 239.8 | 73.1 |  |
+| 64 | 69023.4 | 68960.4 / 69925.9 / 69023.4 | 15.40 | 0.424 | 68.850 | 0 | 237.1 | 71.6 |  |
+| 128 | 70204.0 | 71628.6 / 68856.0 / 70204.0 | 15.66 | 0.460 | 157.210 | 0 | 240.3 | 74.9 |  |
+| 256 | 69583.0 | 68335.9 / 69583.0 / 71374.6 | 15.52 | 0.514 | 338.940 | 0 | 238.4 | 69.4 |  |
+
+## load-a-static-large: 큰 정적 파일 (1 MiB)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0])
+
+| -c | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 5427.2 | 5445.1 / 5427.2 / 5305.4 | 5427.20 | 0.184 | 0.349 | 0 | 65.7 | 55.2 |  |
+| 2 | 9711.9 | 9796.6 / 9711.9 / 9240.2 | 9717.76 | 0.203 | 0.377 | 0 | 130.7 | 104.9 |  |
+| 4 | 15443.0 | 15594.9 / 15443.0 / 15206.4 | 15441.92 | 0.231 | 0.467 | 0 | 228.3 | 155.7 |  |
+| 8 | 18859.0 | 18859.0 / 19462.0 / 18228.4 | 18862.08 | 0.347 | 0.831 | 0 | 312.2 | 182.1 | 도구 한계 |
+| 16 | 17196.0 | 17196.0 / 15833.9 / 17358.5 | 17203.20 | 0.801 | 1.660 | 0 | 394.1 | 177.3 |  |
+| 32 | 16452.8 | 16462.9 / 15687.9 / 16452.8 | 16455.68 | 1.030 | 98.560 | 0 | 378.7 | 177.4 |  |
+| 64 | 16896.7 | 17268.1 / 16757.2 / 16896.7 | 16896.00 | 1.130 | 291.330 | 0 | 363.7 | 175.9 |  |
+| 128 | 16804.3 | 17163.1 / 15044.9 / 16804.3 | 16803.84 | 1.290 | 667.300 | 0 | 372.7 | 177.4 |  |
+| 256 | 15128.5 | 15794.0 / 15128.5 / 14215.0 | 15134.72 | 1.420 | 1560.000 | 0 | 336.6 | 167.4 |  |
+
+## load-a-cgi: CGI (/cgi-bin/adder?1&amp;2)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0])
+
+| -c | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1594.4 | 1680.5 / 1559.9 / 1594.4 | 0.33 | 0.577 | 5.180 | 0 | 93.8 | 2.7 |  |
+| 2 | 2733.1 | 2732.7 / 2767.1 / 2733.1 | 0.57 | 0.619 | 5.700 | 0 | 175.8 | 5.1 |  |
+| 4 | 4162.6 | 4162.6 / 4110.9 / 4257.6 | 0.87 | 0.836 | 5.950 | 0 | 311.2 | 8.7 |  |
+| 8 | 4620.5 | 4517.7 / 4632.4 / 4620.5 | 0.96 | 1.610 | 6.780 | 0 | 379.9 | 9.5 |  |
+| 16 | 4624.1 | 4569.6 / 4624.1 / 4658.2 | 0.97 | 3.310 | 8.540 | 0 | 385.7 | 9.3 |  |
+| 32 | 4475.1 | 4475.1 / 4463.9 / 4509.6 | 0.93 | 3.540 | 357.350 | 0 | 364.6 | 9.2 |  |
+| 64 | 4518.8 | 4525.2 / 4517.9 / 4518.8 | 0.94 | 3.730 | 1060.000 | 0 | 375.9 | 9.3 |  |
+| 128 | 4544.2 | 4572.8 / 4544.2 / 4486.2 | 0.95 | 3.680 | 2410.000 | 0 | 378.2 | 9.2 |  |
+| 256 | 4476.3 | 4502.4 / 4372.4 / 4476.3 | 0.93 | 3.640 | 5120.000 | 0 | 373.2 | 9.3 |  |
+
+## load-a-proxy: 중계 (/api -&gt; 백엔드 2개)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0, 0, 0])
+
+| -c | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 9367.7 | 9367.7 / 9454.1 / 9259.1 | 2.09 | 0.102 | 0.238 | 0 | 71.0 | 9.9 |  |
+| 2 | 18898.7 | 18584.4 / 18932.7 / 18898.7 | 4.22 | 0.103 | 0.181 | 0 | 146.8 | 20.5 |  |
+| 4 | 35219.2 | 35219.2 / 35148.7 / 36444.4 | 7.86 | 0.108 | 0.169 | 0 | 296.7 | 32.3 |  |
+| 8 | 52458.2 | 52458.2 / 52617.6 / 49312.6 | 11.70 | 0.143 | 0.223 | 0 | 670.9 | 68.3 |  |
+| 16 | 57045.7 | 57045.7 / 57127.3 / 56973.7 | 12.73 | 0.233 | 0.788 | 0 | 1183.6 | 109.7 |  |
+| 32 | 59400.6 | 59400.6 / 59766.4 / 55548.4 | 13.25 | 0.307 | 31.820 | 0 | 1189.4 | 107.3 |  |
+| 64 | 62575.0 | 62559.7 / 62708.4 / 62575.0 | 13.96 | 0.339 | 80.150 | 0 | 1189.3 | 108.5 |  |
+| 128 | 65349.2 | 65071.1 / 65368.4 / 65349.2 | 14.58 | 0.367 | 168.710 | 0 | 1196.0 | 109.2 |  |
+| 256 | 65333.8 | 65214.0 / 65333.8 / 65398.8 | 14.58 | 0.402 | 360.680 | 0 | 1193.5 | 107.6 |  |
+
+## load-b-threads: 작업 스레드 수 효과 (home.html, -c 4)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0, 0, 0, 0, 0])
+
+| --threads | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 31801.7 | 30553.5 / 31887.4 / 31801.7 | 7.10 | 0.032 | 9.310 | 0 | 54.5 | 27.4 |  |
+| 4 | 81138.2 | 86233.5 / 81138.2 / 75733.1 | 18.10 | 0.043 | 0.128 | 0 | 202.1 | 69.0 |  |
+| 8 | 77639.9 | 80712.5 / 77046.9 / 77639.9 | 17.32 | 0.044 | 0.146 | 0 | 195.5 | 69.3 |  |
+| 16 | 80359.9 | 83201.2 / 80102.4 / 80359.9 | 17.93 | 0.042 | 0.153 | 0 | 199.6 | 72.9 |  |
+| 32 | 77232.2 | 79483.0 / 77232.2 / 77081.0 | 17.23 | 0.043 | 0.161 | 0 | 200.9 | 71.6 |  |
+
+## load-keepalive-off: 연결 유지 끔 (ab, -k 없음, home.html)
+
+판정: **통과** (오류 합계 0, 서버 종료 코드 [0])
+
+포화 지점: -c 32
+
+| -c | 초당 처리 건수 | 3회 | MiB/s | p50 | p99 | 오류 | 서버 CPU% | 도구 CPU% | 비고 |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 13483.3 | 13509.8 / 13390.5 / 13483.3 | 2.94 | 0.000 | 0.000 | 0 | 49.0 | 33.6 |  |
+| 2 | 27602.8 | 27568.9 / 27602.8 / 27988.8 | 6.03 | 0.000 | 0.000 | 0 | 104.0 | 57.9 |  |
+| 4 | 43008.3 | 43775.7 / 43008.3 / 40986.9 | 9.39 | 0.000 | 0.000 | 0 | 178.3 | 83.5 |  |
+| 8 | 52671.3 | 52671.3 / 52695.8 / 52510.4 | 11.50 | 0.000 | 0.000 | 0 | 229.2 | 96.9 | 도구 한계 |
+| 16 | 51939.8 | 51827.7 / 51939.8 / 52026.3 | 11.34 | 0.000 | 1.000 | 0 | 249.6 | 97.1 | 도구 한계 |
+| 32 | 56660.2 | 56939.2 / 56660.2 / 56652.1 | 12.37 | 1.000 | 1.000 | 0 | 188.4 | 97.1 | 도구 한계 |
+| 64 | 56206.3 | 56209.9 / 56206.3 / 55784.0 | 12.28 | 1.000 | 1.000 | 0 | 176.1 | 97.0 | 도구 한계 |
+| 128 | 58003.2 | 58197.7 / 57822.3 / 58003.2 | 12.67 | 2.000 | 3.000 | 0 | 203.8 | 96.9 | 도구 한계 |
+| 256 | 57253.5 | 57620.6 / 57172.8 / 57253.5 | 12.50 | 4.000 | 5.000 | 0 | 207.3 | 96.9 | 도구 한계 |
+
+## 시나리오 표에 옮길 실제 결과
+
+- load-a-static-small: 통과. 최고 79523 req/s (-c 4, p50 0.04ms, p99 0.13ms), 포화 지점 -c 4
+- load-a-static-large: 통과. 최고 18859 req/s (-c 8, p50 0.35ms, p99 0.83ms), 전송량 18862 MiB/s, 도구 한계 구간 -c 8
+- load-a-cgi: 통과. 최고 4624 req/s (-c 16, p50 3.31ms, p99 8.54ms)
+- load-a-proxy: 통과. 최고 65349 req/s (-c 128, p50 0.37ms, p99 168.71ms)
+- load-b-threads: 통과. -c 4에서 --threads 4일 때 최고 81138 req/s (p99 0.13ms)
+- load-keepalive-off: 통과. 최고 58003 req/s (-c 128, p50 2.00ms, p99 3.00ms), 포화 지점 -c 32, 도구 한계 구간 -c 8 16 32 64 128 256
+</pre></body></html>
